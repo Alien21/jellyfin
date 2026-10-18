@@ -14,7 +14,8 @@ namespace MediaBrowser.Controller.Dto
         private static readonly ItemFields[] DefaultExcludedFields =
         [
             ItemFields.SeasonUserData,
-            ItemFields.RefreshState
+            ItemFields.RefreshState,
+            ItemFields.LibraryInfo
         ];
 
         private static readonly ImageType[] AllImageTypes = Enum.GetValues<ImageType>();

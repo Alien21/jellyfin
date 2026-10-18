@@ -315,7 +315,7 @@ public class ItemPersistenceService : IItemPersistenceService
         ArgumentNullException.ThrowIfNull(items);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var tuples = new List<(BaseItemDto Item, List<Guid>? AncestorIds, BaseItemDto TopParent, IEnumerable<string> UserDataKey, List<string> InheritedTags)>();
+        var tuples = new List<(BaseItemDto Item, List<Guid>? AncestorIds, BaseItemDto? TopParent, IEnumerable<string> UserDataKey, List<string> InheritedTags)>();
         foreach (var item in items.GroupBy(e => e.Id).Select(e => e.Last()).Where(e => e.Id != BaseItemRepository.PlaceholderId))
         {
             var ancestorIds = item.SupportsAncestors ?
@@ -323,6 +323,7 @@ public class ItemPersistenceService : IItemPersistenceService
                 null;
 
             var topParent = item.GetTopParent();
+            item.TopParentId = topParent?.Id;
 
             var userdataKey = item.GetUserDataKeys();
             var inheritedTags = item.GetInheritedTags();

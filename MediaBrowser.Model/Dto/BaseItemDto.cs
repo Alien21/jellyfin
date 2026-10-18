@@ -273,6 +273,16 @@ namespace MediaBrowser.Model.Dto
         public Guid? ParentId { get; set; }
 
         /// <summary>
+        /// Gets or sets the id of the library containing the item.
+        /// </summary>
+        public Guid? LibraryId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the name of the library containing the item.
+        /// </summary>
+        public string LibraryName { get; set; }
+
+        /// <summary>
         /// Gets or sets the type.
         /// </summary>
         /// <value>The type.</value>

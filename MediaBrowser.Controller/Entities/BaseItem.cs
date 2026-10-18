@@ -489,6 +489,12 @@ namespace MediaBrowser.Controller.Entities
         public Guid ParentId { get; set; }
 
         /// <summary>
+        /// Gets or sets the persisted id of the top-level physical parent.
+        /// </summary>
+        [JsonIgnore]
+        public Guid? TopParentId { get; set; }
+
+        /// <summary>
         /// Gets or sets the logger.
         /// </summary>
         public static ILogger<BaseItem> Logger { get; set; }

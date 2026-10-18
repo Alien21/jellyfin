@@ -179,12 +179,17 @@ namespace Emby.Server.Implementations.Dto
                 resumeDataBatch = _userDataRepository.GetResumeUserDataBatch(accessibleItems, user);
             }
 
-            // Pre-compute collection folders once to avoid N+1 queries in CanDelete
+            // Pre-compute collection folders once for library information and CanDelete.
             List<Folder>? allCollectionFolders = null;
-            if (user is not null && options.ContainsField(ItemFields.CanDelete))
+            if ((user is not null && options.ContainsField(ItemFields.CanDelete))
+                || (accessibleItems.Count > 0 && options.ContainsField(ItemFields.LibraryInfo)))
             {
                 allCollectionFolders = _libraryManager.GetUserRootFolder().Children.OfType<Folder>().ToList();
             }
+
+            var visibleLibraryFolders = options.ContainsField(ItemFields.LibraryInfo) && allCollectionFolders is not null
+                ? GetVisibleLibraryFolders(user, allCollectionFolders)
+                : null;
 
             // Batch-fetch by-name item counts to avoid N+1 queries
             Dictionary<Guid, ItemCounts>? itemCountsBatch = null;
@@ -284,7 +289,8 @@ namespace Emby.Server.Implementations.Dto
                     artistsBatch,
                     resumeDataBatch?.GetValueOrDefault(item.Id),
                     peopleBatch,
-                    alternateVersionItemIds);
+                    alternateVersionItemIds,
+                    visibleLibraryFolders);
 
                 if (item is LiveTvChannel tvChannel)
                 {
@@ -348,7 +354,8 @@ namespace Emby.Server.Implementations.Dto
             IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null,
             VersionResumeData? resumeData = null,
             IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null,
-            IReadOnlySet<Guid>? alternateVersionItemIds = null)
+            IReadOnlySet<Guid>? alternateVersionItemIds = null,
+            List<Folder>? visibleLibraryFolders = null)
         {
             var dto = new BaseItemDto
             {
@@ -418,6 +425,26 @@ namespace Emby.Server.Implementations.Dto
             }
 
             AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds);
+
+            if (options.ContainsField(ItemFields.LibraryInfo))
+            {
+                visibleLibraryFolders ??= GetVisibleLibraryFolders(user, allCollectionFolders);
+                // Persisted items already carry their physical library root, so normal search
+                // results can be matched in memory without fetching their parent hierarchy.
+                Folder? library = item.TopParentId is { } topParentId && !topParentId.IsEmpty()
+                    ? visibleLibraryFolders.Find(folder => folder is CollectionFolder collection
+                        && collection.PhysicalFolderIds.Contains(topParentId))
+                    : null;
+
+                // Newly created items may not have a persisted root yet.
+                if (library is null && visibleLibraryFolders.Count > 0)
+                {
+                    library = _libraryManager.GetCollectionFolders(item, visibleLibraryFolders).FirstOrDefault();
+                }
+
+                dto.LibraryId = library?.Id;
+                dto.LibraryName = library?.Name;
+            }
 
             if (options.ContainsField(ItemFields.CanDelete))
             {
@@ -520,6 +547,13 @@ namespace Emby.Server.Implementations.Dto
             }
 
             return dto;
+        }
+
+        private List<Folder> GetVisibleLibraryFolders(User? user, IEnumerable<Folder>? allCollectionFolders)
+        {
+            return (allCollectionFolders ?? _libraryManager.GetUserRootFolder().Children.OfType<Folder>())
+                .Where(folder => folder is CollectionFolder && (user is null || folder.IsVisible(user)))
+                .ToList();
         }
 
         private Dictionary<Guid, ItemCounts> GetItemCountsBatch(IReadOnlyList<BaseItem> items, User? user)
