@@ -7,7 +7,7 @@
 
   <ItemGroup>
     <Reference Include="Jellyfin.Api">
-      <HintPath>Jellyfin.Api.dll</HintPath>
+      <HintPath>../../_temp/fuzz/Jellyfin.Api.Fuzz/instrumented/Jellyfin.Api.dll</HintPath>
     </Reference>
   </ItemGroup>
 

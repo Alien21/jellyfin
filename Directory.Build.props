@@ -3,6 +3,12 @@
 
   <PropertyGroup>
     <Nullable>enable</Nullable>
+    <!-- Keep Rider and ordinary dotnet builds in the same generated directories as build_linux.sh. -->
+    <UseArtifactsOutput Condition="'$(UseArtifactsOutput)' == ''">true</UseArtifactsOutput>
+    <ArtifactsPath Condition="'$(ArtifactsPath)' == ''">$(MSBuildThisFileDirectory)_temp</ArtifactsPath>
+    <VSTestResultsDirectory Condition="'$(VSTestResultsDirectory)' == ''">$(MSBuildThisFileDirectory)_tests/$(MSBuildProjectName)</VSTestResultsDirectory>
+    <!-- Exclude legacy outputs too: changing obj's location must not include old generated C# files. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/bin/**;**/obj/**;$(MSBuildThisFileDirectory)_temp/**;$(MSBuildThisFileDirectory)_output/**;$(MSBuildThisFileDirectory)_tests/**;$(MSBuildThisFileDirectory)_artifacts/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <PropertyGroup>

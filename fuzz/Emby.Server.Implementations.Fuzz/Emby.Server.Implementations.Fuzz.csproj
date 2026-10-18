@@ -7,7 +7,7 @@
 
   <ItemGroup>
     <Reference Include="Emby.Server.Implementations">
-      <HintPath>Emby.Server.Implementations.dll</HintPath>
+      <HintPath>../../_temp/fuzz/Emby.Server.Implementations.Fuzz/instrumented/Emby.Server.Implementations.dll</HintPath>
     </Reference>
   </ItemGroup>
 

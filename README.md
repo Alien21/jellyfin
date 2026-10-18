@@ -72,6 +72,8 @@ After dependencies have been installed you will need to clone a local copy of th
 git clone https://github.com/jellyfin/jellyfin.git
 ```
 
+For the local Linux package workflow, see [README.build.md](README.build.md) and [README.deploy.md](README.deploy.md).
+
 ### Installing the Web Client
 
 The server is configured to host the static files required for the [web client](https://github.com/jellyfin/jellyfin-web) in addition to serving the backend by default. Before you can run the server, you will need to get a copy of the web client since they are not included in this repository directly.
@@ -105,7 +107,7 @@ To run the server from the command line you can use the `dotnet run` command. Th
 
 ```bash
 cd jellyfin                          # Move into the repository directory
-dotnet run --project Jellyfin.Server --webdir /absolute/path/to/jellyfin-web/dist # Run the server startup project
+dotnet run --project Jellyfin.Server --webdir /absolute/path/to/jellyfin-web/_output/jellyfin-web # Run the server startup project
 ```
 
 A second option is to build the project and then run the resulting executable file directly. When running the executable directly you can easily add command line options. Add the `--help` flag to list details on all the supported command line options.
@@ -114,7 +116,7 @@ A second option is to build the project and then run the resulting executable fi
 
 ```bash
 dotnet build                       # Build the project
-cd Jellyfin.Server/bin/Debug/net10.0 # Change into the build output directory
+cd _temp/bin/Jellyfin.Server/debug # Change into the build output directory
 ```
 
 2. Execute the build output. On Linux, Mac, etc. use `./jellyfin` and on Windows use `jellyfin.exe`.

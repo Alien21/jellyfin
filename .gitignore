@@ -282,3 +282,8 @@ mono_crash.*.json
 # Devcontainer temp files
 .devcontainer/devcontainer-lock.json
 dotnet/
+# Local build, test and package outputs (build_linux.sh and Directory.Build.props).
+/_artifacts/
+/_output/
+/_temp/
+/_tests/
