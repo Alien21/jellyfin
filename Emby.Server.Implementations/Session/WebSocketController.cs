@@ -102,31 +102,72 @@ namespace Emby.Server.Implementations.Session
             CancellationToken cancellationToken)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            IWebSocketConnection? socket;
+            IWebSocketConnection[] sockets;
             try
             {
                 _socketsLock.EnterReadLock();
-                socket = _sockets.Where(i => i.State == WebSocketState.Open).MaxBy(i => i.LastActivityDate);
+                var openSockets = _sockets.Where(i => i.State == WebSocketState.Open);
+                if (IsStateNotification(name))
+                {
+                    // Browser tabs share a session and each needs its own state notifications.
+                    sockets = openSockets.ToArray();
+                }
+                else
+                {
+                    // Playback and SyncPlay control apply to a single active player.
+                    var socket = openSockets.MaxBy(i => i.LastActivityDate);
+                    sockets = socket is null ? [] : [socket];
+                }
             }
             finally
             {
                 _socketsLock.ExitReadLock();
             }
 
-            if (socket is null)
+            if (sockets.Length == 0)
             {
                 return Task.CompletedTask;
             }
 
-            return socket.SendAsync(
-                new OutboundWebSocketMessage<T>
-                {
-                    Data = data,
-                    MessageType = name,
-                    MessageId = messageId
-                },
-                cancellationToken);
+            var message = new OutboundWebSocketMessage<T>
+            {
+                Data = data,
+                MessageType = name,
+                MessageId = messageId
+            };
+
+            if (sockets.Length == 1)
+            {
+                return sockets[0].SendAsync(message, cancellationToken);
+            }
+
+            // Capture synchronous send failures as well so every connection is attempted.
+            return Task.WhenAll(sockets.Select(async socket =>
+                await socket.SendAsync(message, cancellationToken).ConfigureAwait(false)));
         }
+
+        private static bool IsStateNotification(SessionMessageType name)
+            => name is SessionMessageType.UserDataChanged
+                or SessionMessageType.Sessions
+                or SessionMessageType.RestartRequired
+                or SessionMessageType.ServerShuttingDown
+                or SessionMessageType.ServerRestarting
+                or SessionMessageType.LibraryChanged
+                or SessionMessageType.UserDeleted
+                or SessionMessageType.UserUpdated
+                or SessionMessageType.SeriesTimerCreated
+                or SessionMessageType.TimerCreated
+                or SessionMessageType.SeriesTimerCancelled
+                or SessionMessageType.TimerCancelled
+                or SessionMessageType.RefreshProgress
+                or SessionMessageType.ScheduledTaskEnded
+                or SessionMessageType.PackageInstallationCancelled
+                or SessionMessageType.PackageInstallationFailed
+                or SessionMessageType.PackageInstallationCompleted
+                or SessionMessageType.PackageInstalling
+                or SessionMessageType.PackageUninstalled
+                or SessionMessageType.ActivityLogEntry
+                or SessionMessageType.ScheduledTasksInfo;
 
         /// <inheritdoc />
         public void Dispose()
