@@ -44,6 +44,7 @@ public class ItemsController : BaseJellyfinApiController
     private readonly ISessionManager _sessionManager;
     private readonly IUserDataManager _userDataRepository;
     private readonly ISearchManager _searchManager;
+    private readonly IFavoriteLifecycleService _favoriteLifecycle;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ItemsController"/> class.
@@ -56,6 +57,7 @@ public class ItemsController : BaseJellyfinApiController
     /// <param name="sessionManager">Instance of the <see cref="ISessionManager"/> interface.</param>
     /// <param name="userDataRepository">Instance of the <see cref="IUserDataManager"/> interface.</param>
     /// <param name="searchManager">Instance of the <see cref="ISearchManager"/> interface.</param>
+    /// <param name="favoriteLifecycle">The favorite lifecycle service.</param>
     public ItemsController(
         IUserManager userManager,
         ILibraryManager libraryManager,
@@ -64,7 +66,8 @@ public class ItemsController : BaseJellyfinApiController
         ILogger<ItemsController> logger,
         ISessionManager sessionManager,
         IUserDataManager userDataRepository,
-        ISearchManager searchManager)
+        ISearchManager searchManager,
+        IFavoriteLifecycleService favoriteLifecycle)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
@@ -74,6 +77,7 @@ public class ItemsController : BaseJellyfinApiController
         _sessionManager = sessionManager;
         _userDataRepository = userDataRepository;
         _searchManager = searchManager;
+        _favoriteLifecycle = favoriteLifecycle;
     }
 
     /// <summary>
@@ -1152,7 +1156,14 @@ public class ItemsController : BaseJellyfinApiController
             return NotFound();
         }
 
+        var requestedFavorite = userDataDto.IsFavorite;
+        userDataDto.IsFavorite = null;
         _userDataRepository.SaveUserData(user, item, userDataDto, UserDataSaveReason.UpdateUserData);
+        userDataDto.IsFavorite = requestedFavorite;
+        if (requestedFavorite.HasValue)
+        {
+            _favoriteLifecycle.SetFavorite(user, item, requestedFavorite.Value);
+        }
 
         return _userDataRepository.GetUserDataDto(item, user);
     }

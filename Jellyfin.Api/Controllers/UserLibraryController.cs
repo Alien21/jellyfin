@@ -43,6 +43,7 @@ public class UserLibraryController : BaseJellyfinApiController
     private readonly IUserViewManager _userViewManager;
     private readonly IFileSystem _fileSystem;
     private readonly IProviderManager _providerManager;
+    private readonly IFavoriteLifecycleService _favoriteLifecycle;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="UserLibraryController"/> class.
@@ -54,6 +55,7 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <param name="userViewManager">Instance of the <see cref="IUserViewManager"/> interface.</param>
     /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
     /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
+    /// <param name="favoriteLifecycle">The favorite lifecycle service.</param>
     public UserLibraryController(
         IUserManager userManager,
         IUserDataManager userDataRepository,
@@ -61,7 +63,8 @@ public class UserLibraryController : BaseJellyfinApiController
         IDtoService dtoService,
         IUserViewManager userViewManager,
         IFileSystem fileSystem,
-        IProviderManager providerManager)
+        IProviderManager providerManager,
+        IFavoriteLifecycleService favoriteLifecycle)
     {
         _userManager = userManager;
         _userDataRepository = userDataRepository;
@@ -70,6 +73,7 @@ public class UserLibraryController : BaseJellyfinApiController
         _userViewManager = userViewManager;
         _fileSystem = fileSystem;
         _providerManager = providerManager;
+        _favoriteLifecycle = favoriteLifecycle;
     }
 
     /// <summary>
@@ -686,17 +690,7 @@ public class UserLibraryController : BaseJellyfinApiController
     /// <param name="isFavorite">if set to <c>true</c> [is favorite].</param>
     private UserItemDataDto MarkFavorite(User user, BaseItem item, bool isFavorite)
     {
-        // Get the user data for this item
-        var data = _userDataRepository.GetUserData(user, item);
-
-        if (data is not null)
-        {
-            // Set favorite status
-            data.IsFavorite = isFavorite;
-
-            _userDataRepository.SaveUserData(user, item, data, UserDataSaveReason.UpdateUserRating, CancellationToken.None);
-        }
-
+        _favoriteLifecycle.SetFavorite(user, item, isFavorite);
         return _userDataRepository.GetUserDataDto(item, user)!;
     }
 

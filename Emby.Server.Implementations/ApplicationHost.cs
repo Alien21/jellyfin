@@ -549,6 +549,8 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IBlurayExaminer, BdInfoExaminer>();
 
             serviceCollection.AddSingleton<IUserDataManager, UserDataManager>();
+            serviceCollection.AddSingleton<IFavoriteItemMatcher, FavoriteItemMatcher>();
+            serviceCollection.AddSingleton<IFavoriteLifecycleService, FavoriteLifecycleService>();
 
             serviceCollection.AddSingleton<BaseItemRepository>();
             serviceCollection.AddSingleton<IItemRepository>(sp => sp.GetRequiredService<BaseItemRepository>());

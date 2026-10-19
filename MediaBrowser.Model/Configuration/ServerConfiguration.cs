@@ -84,6 +84,11 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// </summary>
     public bool EnableGlobalSearch { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether favorites are synchronized across matching items in accessible libraries.
+    /// </summary>
+    public bool EnableFavoriteSyncAcrossLibraries { get; set; } = false;
+
     public bool EnableNormalizedItemByNameIds { get; set; } = true;
 
     /// <summary>
