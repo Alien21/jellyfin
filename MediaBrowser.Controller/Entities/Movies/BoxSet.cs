@@ -12,6 +12,7 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Dto;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -156,7 +157,17 @@ namespace MediaBrowser.Controller.Entities.Movies
 
         public int GetUniqueItemCount(User user)
         {
-            return GetUniqueItemGroups(GetChildren(user, true, null)).Count;
+            return GetUniqueItemCount(GetChildren(user, true, null));
+        }
+
+        /// <summary>
+        /// Counts distinct collection members, matching library copies by shared metadata identifiers.
+        /// </summary>
+        /// <param name="children">The collection members.</param>
+        /// <returns>The number of distinct members.</returns>
+        public static int GetUniqueItemCount(IReadOnlyList<BaseItem> children)
+        {
+            return GetUniqueItemGroups(children).Count;
         }
 
         public override void FillUserDataDtoValues(
@@ -182,7 +193,7 @@ namespace MediaBrowser.Controller.Entities.Movies
 
             // Mixed collections can contain series or nested collections: their play state still
             // describes recursive playable descendants rather than the direct collection members.
-            if (children.Any(child => child is not Movie))
+            if (children.Any(child => child is not Movie and not Episode))
             {
                 return;
             }
@@ -227,17 +238,27 @@ namespace MediaBrowser.Controller.Entities.Movies
             {
                 var child = children[index];
                 AddIdentity("item:" + child.Id, index);
-                if (child is not Movie)
+                var itemKind = child switch
+                {
+                    Movie => "Movie",
+                    Series => "Series",
+                    Episode => "Episode",
+                    _ => null
+                };
+                if (itemKind is null)
                 {
                     continue;
                 }
 
-                foreach (var provider in new[] { MetadataProvider.Tmdb, MetadataProvider.Imdb })
+                var providers = child is Movie
+                    ? new[] { MetadataProvider.Tmdb, MetadataProvider.Imdb }
+                    : new[] { MetadataProvider.Tmdb, MetadataProvider.Imdb, MetadataProvider.Tvdb };
+                foreach (var provider in providers)
                 {
                     var providerId = child.GetProviderId(provider);
                     if (!string.IsNullOrWhiteSpace(providerId))
                     {
-                        AddIdentity(provider + ":" + providerId.Trim(), index);
+                        AddIdentity(itemKind + ":" + provider + ":" + providerId.Trim(), index);
                     }
                 }
             }

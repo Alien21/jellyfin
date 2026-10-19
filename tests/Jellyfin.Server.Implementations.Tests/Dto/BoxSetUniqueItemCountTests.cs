@@ -63,6 +63,72 @@ public sealed class BoxSetUniqueItemCountTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false, MetadataProvider.Tmdb)]
+    [InlineData(false, MetadataProvider.Imdb)]
+    [InlineData(false, MetadataProvider.Tvdb)]
+    [InlineData(true, MetadataProvider.Tmdb)]
+    [InlineData(true, MetadataProvider.Imdb)]
+    [InlineData(true, MetadataProvider.Tvdb)]
+    public void GetUniqueItemCount_TelevisionLibraryCopies_CountsDistinctItemsAndRetainsEveryChild(bool episode, MetadataProvider provider)
+    {
+        var collection = Collection(
+            TelevisionItem(episode, provider, "100"),
+            TelevisionItem(episode, provider, "100"),
+            TelevisionItem(episode, provider, "200"));
+
+        Assert.Equal(2, collection.Object.GetUniqueItemCount(_user));
+        Assert.Equal(3, collection.Object.GetChildren(_user, true, null).Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GetUniqueItemCount_PartialTelevisionMetadata_MatchesAnySharedIdentifier(bool episode)
+    {
+        var first = TelevisionItem(episode, MetadataProvider.Tvdb, "100");
+        var second = TelevisionItem(episode, MetadataProvider.Imdb, "TT100");
+        var third = TelevisionItem(episode, MetadataProvider.Tvdb, "100");
+        third.SetProviderId(MetadataProvider.Imdb, "tt100");
+        var collection = Collection(first, second, third);
+
+        Assert.Equal(1, collection.Object.GetUniqueItemCount(_user));
+    }
+
+    [Theory]
+    [InlineData(MetadataProvider.Tmdb)]
+    [InlineData(MetadataProvider.Imdb)]
+    [InlineData(MetadataProvider.Tvdb)]
+    public void GetUniqueItemCount_DifferentItemTypesWithSameProviderId_KeepsEveryType(MetadataProvider provider)
+    {
+        var movie = Movie();
+        movie.SetProviderId(provider, "100");
+        var collection = Collection(movie, TelevisionItem(false, provider, "100"), TelevisionItem(true, provider, "100"));
+
+        Assert.Equal(3, collection.Object.GetUniqueItemCount(_user));
+    }
+
+    [Fact]
+    public void GetUniqueItemCount_DifferentEpisodesInSameSeries_KeepsEveryEpisode()
+    {
+        var seriesId = Guid.NewGuid();
+        var first = new Episode { Id = Guid.NewGuid(), SeriesId = seriesId, ParentIndexNumber = 1, IndexNumber = 1 };
+        var second = new Episode { Id = Guid.NewGuid(), SeriesId = seriesId, ParentIndexNumber = 1, IndexNumber = 2 };
+        var collection = Collection(first, second);
+
+        Assert.Equal(2, collection.Object.GetUniqueItemCount(_user));
+    }
+
+    [Fact]
+    public void GetUniqueItemCount_SameEpisodeNumbersInDifferentSeries_KeepsEveryEpisode()
+    {
+        var first = new Episode { Id = Guid.NewGuid(), SeriesId = Guid.NewGuid(), ParentIndexNumber = 1, IndexNumber = 1 };
+        var second = new Episode { Id = Guid.NewGuid(), SeriesId = Guid.NewGuid(), ParentIndexNumber = 1, IndexNumber = 1 };
+        var collection = Collection(first, second);
+
+        Assert.Equal(2, collection.Object.GetUniqueItemCount(_user));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void FillUserDataDtoValues_LibraryCopyPlayed_ReportsOneLogicalUnplayedMovie(bool withItemDto)
@@ -107,6 +173,61 @@ public sealed class BoxSetUniqueItemCountTests : IDisposable
 
         Assert.Equal(2, itemDto.UniqueItemCount);
         Assert.Equal(7, userDto.UnplayedItemCount);
+    }
+
+    [Fact]
+    public void FillUserDataDtoValues_EpisodeLibraryCopyPlayed_ReportsOneLogicalUnplayedEpisode()
+    {
+        BaseItem[] children =
+        [
+            TelevisionItem(true, MetadataProvider.Tvdb, "100"),
+            TelevisionItem(true, MetadataProvider.Tvdb, "100"),
+            TelevisionItem(true, MetadataProvider.Tvdb, "200")
+        ];
+        var collection = Collection(children);
+        var dataManager = new Mock<IUserDataManager>();
+        dataManager.Setup(x => x.GetUserDataBatch(children, _user))
+            .Returns(new Dictionary<Guid, UserItemData>
+            {
+                [children[1].Id] = new() { Key = "episode", Played = true }
+            });
+        BaseItem.UserDataManager = dataManager.Object;
+        var userDto = new UserItemDataDto { Key = "collection" };
+        var itemDto = new BaseItemDto { ChildCount = 3 };
+        var options = new DtoOptions(false) { Fields = [ItemFields.RecursiveItemCount] };
+
+        collection.Object.FillUserDataDtoValues(userDto, new UserItemData { Key = "collection" }, itemDto, _user, options, (1, 3));
+
+        Assert.Equal(2, itemDto.UniqueItemCount);
+        Assert.Equal(3, itemDto.ChildCount);
+        Assert.Equal(3, itemDto.RecursiveItemCount);
+        Assert.Equal(1, userDto.UnplayedItemCount);
+        Assert.Equal(50, userDto.PlayedPercentage);
+        Assert.False(userDto.Played);
+        dataManager.Verify(x => x.GetUserDataBatch(children, _user), Times.Once);
+    }
+
+    [Fact]
+    public void FillUserDataDtoValues_SeriesLibraryCopies_CountsDistinctSeriesAndPreservesRecursivePlayCounts()
+    {
+        var collection = Collection(
+            TelevisionItem(false, MetadataProvider.Tvdb, "100"),
+            TelevisionItem(false, MetadataProvider.Tvdb, "100"),
+            TelevisionItem(false, MetadataProvider.Tvdb, "200"));
+        var dataManager = new Mock<IUserDataManager>(MockBehavior.Strict);
+        BaseItem.UserDataManager = dataManager.Object;
+        var userDto = new UserItemDataDto { Key = "collection" };
+        var itemDto = new BaseItemDto { ChildCount = 3 };
+        var options = new DtoOptions(false) { Fields = [ItemFields.RecursiveItemCount] };
+
+        collection.Object.FillUserDataDtoValues(userDto, new UserItemData { Key = "collection" }, itemDto, _user, options, (2, 9));
+
+        Assert.Equal(2, itemDto.UniqueItemCount);
+        Assert.Equal(3, itemDto.ChildCount);
+        Assert.Equal(9, itemDto.RecursiveItemCount);
+        Assert.Equal(7, userDto.UnplayedItemCount);
+        Assert.Equal(2d / 9 * 100, userDto.PlayedPercentage);
+        dataManager.VerifyNoOtherCalls();
     }
 
     [Theory]
@@ -187,5 +308,14 @@ public sealed class BoxSetUniqueItemCountTests : IDisposable
         }
 
         return movie;
+    }
+
+    private static BaseItem TelevisionItem(bool episode, MetadataProvider provider, string providerId)
+    {
+        BaseItem item = episode ? new Episode() : new Series();
+        item.Id = Guid.NewGuid();
+        item.Name = "Same title";
+        item.SetProviderId(provider, providerId);
+        return item;
     }
 }

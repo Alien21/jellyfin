@@ -1,14 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Collections;
+using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Querying;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Library.Validators;
@@ -46,7 +49,7 @@ public class CollectionPostScanTask : ILibraryPostScanTask
     /// <returns>Task.</returns>
     public async Task Run(IProgress<double> progress, CancellationToken cancellationToken)
     {
-        var collectionNameMoviesMap = new Dictionary<string, HashSet<Guid>>();
+        var collectionNameMoviesMap = new Dictionary<string, List<BaseItem>>();
 
         foreach (var library in _libraryManager.RootFolder.Children)
         {
@@ -69,7 +72,13 @@ public class CollectionPostScanTask : ILibraryPostScanTask
                     Parent = library,
                     StartIndex = startIndex,
                     Limit = pagesize,
-                    Recursive = true
+                    Recursive = true,
+                    DtoOptions = new DtoOptions(false)
+                    {
+                        Fields = [ItemFields.ProviderIds],
+                        EnableImages = false,
+                        EnableUserData = false
+                    }
                 });
 
                 foreach (var m in movies)
@@ -78,11 +87,11 @@ public class CollectionPostScanTask : ILibraryPostScanTask
                     {
                         if (collectionNameMoviesMap.TryGetValue(movie.CollectionName, out var movieList))
                         {
-                            movieList.Add(movie.Id);
+                            movieList.Add(movie);
                         }
                         else
                         {
-                            collectionNameMoviesMap[movie.CollectionName] = new HashSet<Guid> { movie.Id };
+                            collectionNameMoviesMap[movie.CollectionName] = [movie];
                         }
                     }
                 }
@@ -112,15 +121,17 @@ public class CollectionPostScanTask : ILibraryPostScanTask
             Recursive = true
         });
 
-        foreach (var (collectionName, movieIds) in collectionNameMoviesMap)
+        foreach (var (collectionName, movies) in collectionNameMoviesMap)
         {
+            var movieIds = movies.Select(movie => movie.Id).Distinct().ToArray();
             try
             {
+                var uniqueMovieCount = BoxSet.GetUniqueItemCount(movies);
                 var boxSet = boxSets.FirstOrDefault(b => b?.Name == collectionName) as BoxSet;
                 if (boxSet is null)
                 {
-                    // won't automatically create collection if only one movie in it
-                    if (movieIds.Count >= 2)
+                    // Copies of the same movie in different libraries do not make a collection.
+                    if (uniqueMovieCount >= 2)
                     {
                         boxSet = await _collectionManager.CreateCollectionAsync(new CollectionCreationOptions
                         {
@@ -129,6 +140,15 @@ public class CollectionPostScanTask : ILibraryPostScanTask
 
                         await _collectionManager.AddToCollectionAsync(boxSet.Id, movieIds).ConfigureAwait(false);
                     }
+                }
+                else if (uniqueMovieCount < 2 && await CanRemoveDuplicateOnlyCollectionAsync(boxSet, movieIds).ConfigureAwait(false))
+                {
+                    // These children are links to library movies: only the collection metadata is removed.
+                    _libraryManager.DeleteItem(boxSet, new DeleteOptions
+                    {
+                        DeleteFileLocation = true,
+                        DeleteFromExternalProvider = false
+                    });
                 }
                 else
                 {
@@ -149,5 +169,28 @@ public class CollectionPostScanTask : ILibraryPostScanTask
         }
 
         progress.Report(100);
+    }
+
+    private async Task<bool> CanRemoveDuplicateOnlyCollectionAsync(BoxSet boxSet, IReadOnlyCollection<Guid> movieIds)
+    {
+        if (string.IsNullOrWhiteSpace(boxSet.Path)
+            || boxSet.LinkedChildren.Length == 0
+            || boxSet.LinkedChildren.Any(child => !child.ItemId.HasValue || !movieIds.Contains(child.ItemId.Value)))
+        {
+            return false;
+        }
+
+        var collectionsFolder = await _collectionManager.GetCollectionsFolder(false).ConfigureAwait(false);
+        if (collectionsFolder is null
+            || string.IsNullOrWhiteSpace(collectionsFolder.Path)
+            || !boxSet.ParentId.Equals(collectionsFolder.Id))
+        {
+            return false;
+        }
+
+        var collectionParentPath = Path.GetDirectoryName(Path.GetFullPath(boxSet.Path));
+        var collectionsFolderPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(collectionsFolder.Path));
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return string.Equals(collectionParentPath, collectionsFolderPath, comparison);
     }
 }
