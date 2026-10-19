@@ -26,7 +26,7 @@ using Xunit;
 
 namespace Jellyfin.Server.Implementations.Tests.Dto;
 
-public class DtoServiceTests : IDisposable
+public sealed class DtoServiceTests : IDisposable
 {
     private readonly Mock<ILibraryManager> _libraryManagerMock;
     private readonly Mock<IUserDataManager> _userDataManagerMock;

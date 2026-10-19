@@ -74,6 +74,11 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// </summary>
     public bool EnableLibrarySourceDetails { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether clients should offer version selection before starting playback.
+    /// </summary>
+    public bool EnablePlaybackVersionSelection { get; set; } = false;
+
     public bool EnableNormalizedItemByNameIds { get; set; } = true;
 
     /// <summary>

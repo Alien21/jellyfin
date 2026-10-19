@@ -25,6 +25,11 @@ namespace MediaBrowser.Model.System
         public bool EnableLibrarySourceDetails { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether clients should offer version selection before starting playback.
+        /// </summary>
+        public bool EnablePlaybackVersionSelection { get; set; }
+
+        /// <summary>
         /// Gets or sets the server version.
         /// </summary>
         /// <value>The version.</value>

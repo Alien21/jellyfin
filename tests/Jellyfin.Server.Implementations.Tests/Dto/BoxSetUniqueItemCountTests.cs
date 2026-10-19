@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Configuration;
@@ -17,7 +18,7 @@ using Xunit;
 
 namespace Jellyfin.Server.Implementations.Tests.Dto;
 
-public class BoxSetUniqueItemCountTests : IDisposable
+public sealed class BoxSetUniqueItemCountTests : IDisposable
 {
     private readonly IServerConfigurationManager? _previousConfigurationManager = BaseItem.ConfigurationManager;
     private readonly IUserDataManager _previousUserDataManager = BaseItem.UserDataManager;
@@ -33,7 +34,7 @@ public class BoxSetUniqueItemCountTests : IDisposable
     [Fact]
     public void GetUniqueItemCount_LibraryCopies_CountsSevenMoviesAndRetainsAllTenChildren()
     {
-        var movies = Enumerable.Range(1, 7).Select(id => Movie(id.ToString())).ToArray();
+        var movies = Enumerable.Range(1, 7).Select(id => Movie(id.ToString(CultureInfo.InvariantCulture))).ToArray();
         BaseItem[] children = [.. movies, Movie("4"), Movie("5"), Movie("7")];
         var collection = Collection(children);
 
@@ -113,7 +114,7 @@ public class BoxSetUniqueItemCountTests : IDisposable
     [InlineData(true, 0)]
     public void FillUserDataDtoValues_SevenMoviesTenCopies_CountsUniqueUnplayedMovies(bool played, int expectedUnplayed)
     {
-        BaseItem[] children = [.. Enumerable.Range(1, 7).Select(id => Movie(id.ToString())), Movie("4"), Movie("5"), Movie("7")];
+        BaseItem[] children = [.. Enumerable.Range(1, 7).Select(id => Movie(id.ToString(CultureInfo.InvariantCulture))), Movie("4"), Movie("5"), Movie("7")];
         var collection = Collection(children);
         var dataManager = new Mock<IUserDataManager>();
         dataManager.Setup(x => x.GetUserDataBatch(children, _user))
@@ -157,6 +158,7 @@ public class BoxSetUniqueItemCountTests : IDisposable
         collection.Verify(x => x.GetChildren(_user, true, It.IsAny<InternalItemsQuery>()), Times.Never);
         dataManager.VerifyNoOtherCalls();
     }
+
     public void Dispose()
     {
         BaseItem.UserDataManager = _previousUserDataManager;
