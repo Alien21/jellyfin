@@ -76,6 +76,8 @@ public class SystemManager : ISystemManager
             ServerName = _applicationHost.FriendlyName,
             EnableLibrarySourceDetails = _configurationManager.Configuration.EnableLibrarySourceDetails,
             EnablePlaybackVersionSelection = _configurationManager.Configuration.EnablePlaybackVersionSelection,
+            EnableEnhancedSubtitleSelection = _configurationManager.Configuration.EnableEnhancedSubtitleSelection,
+            EnableEnhancedAudioSelection = _configurationManager.Configuration.EnableEnhancedAudioSelection,
             EnableGlobalSearch = _configurationManager.Configuration.EnableGlobalSearch,
             LocalAddress = _applicationHost.GetSmartApiUrl(request),
             StartupWizardCompleted = _configurationManager.CommonConfiguration.IsStartupWizardCompleted,
@@ -122,6 +124,8 @@ public class SystemManager : ISystemManager
             ServerName = _applicationHost.FriendlyName,
             EnableLibrarySourceDetails = _configurationManager.Configuration.EnableLibrarySourceDetails,
             EnablePlaybackVersionSelection = _configurationManager.Configuration.EnablePlaybackVersionSelection,
+            EnableEnhancedSubtitleSelection = _configurationManager.Configuration.EnableEnhancedSubtitleSelection,
+            EnableEnhancedAudioSelection = _configurationManager.Configuration.EnableEnhancedAudioSelection,
             EnableGlobalSearch = _configurationManager.Configuration.EnableGlobalSearch,
             LocalAddress = _applicationHost.GetSmartApiUrl(request),
             StartupWizardCompleted = _configurationManager.CommonConfiguration.IsStartupWizardCompleted

@@ -80,6 +80,16 @@ public class ServerConfiguration : BaseApplicationConfiguration
     public bool EnablePlaybackVersionSelection { get; set; } = false;
 
     /// <summary>
+    /// Gets or sets a value indicating whether clients should display localized subtitle details and separate track titles.
+    /// </summary>
+    public bool EnableEnhancedSubtitleSelection { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether clients should display localized audio details and separate track titles.
+    /// </summary>
+    public bool EnableEnhancedAudioSelection { get; set; } = false;
+
+    /// <summary>
     /// Gets or sets a value indicating whether clients should search all libraries from within a library.
     /// </summary>
     public bool EnableGlobalSearch { get; set; } = false;
