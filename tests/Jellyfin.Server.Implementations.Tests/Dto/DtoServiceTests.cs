@@ -8,6 +8,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common;
 using MediaBrowser.Controller.Chapters;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -16,6 +17,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Trickplay;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -24,14 +26,20 @@ using Xunit;
 
 namespace Jellyfin.Server.Implementations.Tests.Dto;
 
-public class DtoServiceTests
+public class DtoServiceTests : IDisposable
 {
     private readonly Mock<ILibraryManager> _libraryManagerMock;
     private readonly Mock<IUserDataManager> _userDataManagerMock;
     private readonly DtoService _dtoService;
+    private readonly IServerConfigurationManager? _previousConfigurationManager = BaseItem.ConfigurationManager;
+    private readonly ServerConfiguration _configuration = new() { EnableLibrarySourceDetails = true };
 
     public DtoServiceTests()
     {
+        var configurationManager = new Mock<IServerConfigurationManager>();
+        configurationManager.Setup(x => x.Configuration).Returns(_configuration);
+        BaseItem.ConfigurationManager = configurationManager.Object;
+
         _libraryManagerMock = new Mock<ILibraryManager>();
         _userDataManagerMock = new Mock<IUserDataManager>();
 
@@ -220,6 +228,43 @@ public class DtoServiceTests
         _libraryManagerMock.Verify(
             x => x.GetChildCountBatch(It.IsAny<IReadOnlyList<Guid>>(), It.IsAny<User?>()),
             Times.Never);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GetBaseItemDtos_BoxSetWithoutUserData_RespectsFeatureFlag(bool enabled)
+    {
+        _configuration.EnableLibrarySourceDetails = enabled;
+        var user = new User("user", "auth-provider", "reset-provider");
+        var movie = new MediaBrowser.Controller.Entities.Movies.Movie { Id = Guid.NewGuid() };
+        movie.SetProviderId(MetadataProvider.Tmdb, "100");
+        var copy = new MediaBrowser.Controller.Entities.Movies.Movie { Id = Guid.NewGuid() };
+        copy.SetProviderId(MetadataProvider.Tmdb, "100");
+        var boxSet = new Mock<MediaBrowser.Controller.Entities.Movies.BoxSet> { CallBase = true };
+        boxSet.Object.Id = Guid.NewGuid();
+        boxSet.Setup(x => x.GetClientTypeName()).Returns("BoxSet");
+        boxSet.Setup(x => x.GetChildren(user, true, It.IsAny<InternalItemsQuery>())).Returns([movie, copy]);
+        _libraryManagerMock
+            .Setup(x => x.GetChildCountBatch(It.IsAny<IReadOnlyList<Guid>>(), user))
+            .Returns(new Dictionary<Guid, int> { [boxSet.Object.Id] = 2 });
+        var options = new DtoOptions(false)
+        {
+            EnableImages = false,
+            EnableUserData = false,
+            Fields = [ItemFields.ChildCount]
+        };
+
+        var dto = _dtoService.GetBaseItemDtos([boxSet.Object], options, user, skipVisibilityCheck: true)[0];
+
+        Assert.Equal(2, dto.ChildCount);
+        Assert.Equal(enabled ? 1 : (int?)null, dto.UniqueItemCount);
+        boxSet.Verify(x => x.GetChildren(user, true, It.IsAny<InternalItemsQuery>()), enabled ? Times.Once() : Times.Never());
+    }
+
+    public void Dispose()
+    {
+        BaseItem.ConfigurationManager = _previousConfigurationManager!;
     }
 
     private static CollectionFolder BuildLibrary(CollectionType? collectionType)

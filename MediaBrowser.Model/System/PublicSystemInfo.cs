@@ -20,6 +20,11 @@ namespace MediaBrowser.Model.System
         public string ServerName { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether library source labels and distinct collection counts are enabled.
+        /// </summary>
+        public bool EnableLibrarySourceDetails { get; set; }
+
+        /// <summary>
         /// Gets or sets the server version.
         /// </summary>
         /// <value>The version.</value>

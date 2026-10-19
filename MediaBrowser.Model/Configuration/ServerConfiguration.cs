@@ -69,6 +69,11 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// </summary>
     public bool EnableMetrics { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether library source labels and distinct collection counts are enabled.
+    /// </summary>
+    public bool EnableLibrarySourceDetails { get; set; } = false;
+
     public bool EnableNormalizedItemByNameIds { get; set; } = true;
 
     /// <summary>

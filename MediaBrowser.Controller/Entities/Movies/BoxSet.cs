@@ -13,6 +13,8 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
 
 namespace MediaBrowser.Controller.Entities.Movies
@@ -150,6 +152,100 @@ namespace MediaBrowser.Controller.Entities.Movies
         public BoxSetInfo GetLookupInfo()
         {
             return GetItemLookupInfo<BoxSetInfo>();
+        }
+
+        public int GetUniqueItemCount(User user)
+        {
+            return GetUniqueItemGroups(GetChildren(user, true, null)).Count;
+        }
+
+        public override void FillUserDataDtoValues(
+            UserItemDataDto dto,
+            UserItemData userData,
+            BaseItemDto itemDto,
+            User user,
+            DtoOptions fields,
+            (int Played, int Total)? precomputedCounts = null)
+        {
+            base.FillUserDataDtoValues(dto, userData, itemDto, user, fields, precomputedCounts);
+            if (!ConfigurationManager.Configuration.EnableLibrarySourceDetails)
+            {
+                return;
+            }
+
+            var children = GetChildren(user, true, null);
+            var groups = GetUniqueItemGroups(children);
+            if (itemDto is not null)
+            {
+                itemDto.UniqueItemCount = groups.Count;
+            }
+
+            // Mixed collections can contain series or nested collections: their play state still
+            // describes recursive playable descendants rather than the direct collection members.
+            if (children.Any(child => child is not Movie))
+            {
+                return;
+            }
+
+            var userDataBatch = UserDataManager.GetUserDataBatch(children, user);
+            var played = groups.Count(group => group.Any(child =>
+                userDataBatch.TryGetValue(child.Id, out var data) && data.Played));
+            dto.UnplayedItemCount = groups.Count - played;
+            dto.PlayedPercentage = groups.Count > 0 ? played / (double)groups.Count * 100 : 0;
+            dto.Played = played == groups.Count;
+        }
+
+        private static List<List<BaseItem>> GetUniqueItemGroups(IReadOnlyList<BaseItem> children)
+        {
+            var parents = Enumerable.Range(0, children.Count).ToArray();
+            var identities = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            int Find(int index)
+            {
+                while (parents[index] != index)
+                {
+                    parents[index] = parents[parents[index]];
+                    index = parents[index];
+                }
+
+                return index;
+            }
+
+            void AddIdentity(string identity, int index)
+            {
+                if (identities.TryGetValue(identity, out var previous))
+                {
+                    parents[Find(index)] = Find(previous);
+                }
+                else
+                {
+                    identities[identity] = index;
+                }
+            }
+
+            for (var index = 0; index < children.Count; index++)
+            {
+                var child = children[index];
+                AddIdentity("item:" + child.Id, index);
+                if (child is not Movie)
+                {
+                    continue;
+                }
+
+                foreach (var provider in new[] { MetadataProvider.Tmdb, MetadataProvider.Imdb })
+                {
+                    var providerId = child.GetProviderId(provider);
+                    if (!string.IsNullOrWhiteSpace(providerId))
+                    {
+                        AddIdentity(provider + ":" + providerId.Trim(), index);
+                    }
+                }
+            }
+
+            return children.Select((child, index) => (Child: child, Group: Find(index)))
+                .GroupBy(pair => pair.Group, pair => pair.Child)
+                .Select(group => group.ToList())
+                .ToList();
         }
 
         public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)

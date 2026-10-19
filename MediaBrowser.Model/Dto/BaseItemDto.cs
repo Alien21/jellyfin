@@ -345,6 +345,11 @@ namespace MediaBrowser.Model.Dto
         public int? ChildCount { get; set; }
 
         /// <summary>
+        /// Gets or sets the number of distinct direct items in a collection, counting movie copies with shared provider identifiers once.
+        /// </summary>
+        public int? UniqueItemCount { get; set; }
+
+        /// <summary>
         /// Gets or sets the name of the series.
         /// </summary>
         /// <value>The name of the series.</value>

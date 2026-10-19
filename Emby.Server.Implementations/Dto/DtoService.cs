@@ -690,6 +690,13 @@ namespace Emby.Server.Implementations.Dto
                     }
                 }
 
+                if (folder is MediaBrowser.Controller.Entities.Movies.BoxSet boxSet
+                    && BaseItem.ConfigurationManager.Configuration.EnableLibrarySourceDetails
+                    && dto.ChildCount.HasValue)
+                {
+                    dto.UniqueItemCount ??= boxSet.GetUniqueItemCount(user);
+                }
+
                 if (options.ContainsField(ItemFields.CumulativeRunTimeTicks))
                 {
                     dto.CumulativeRunTimeTicks = item.RunTimeTicks;

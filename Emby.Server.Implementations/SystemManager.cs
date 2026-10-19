@@ -74,6 +74,7 @@ public class SystemManager : ISystemManager
             TranscodingTempPath = _configurationManager.GetTranscodePath(),
 #pragma warning restore CS0618 // Type or member is obsolete
             ServerName = _applicationHost.FriendlyName,
+            EnableLibrarySourceDetails = _configurationManager.Configuration.EnableLibrarySourceDetails,
             LocalAddress = _applicationHost.GetSmartApiUrl(request),
             StartupWizardCompleted = _configurationManager.CommonConfiguration.IsStartupWizardCompleted,
             SupportsLibraryMonitor = true,
@@ -117,6 +118,7 @@ public class SystemManager : ISystemManager
             ProductName = _applicationHost.Name,
             Id = _applicationHost.SystemId,
             ServerName = _applicationHost.FriendlyName,
+            EnableLibrarySourceDetails = _configurationManager.Configuration.EnableLibrarySourceDetails,
             LocalAddress = _applicationHost.GetSmartApiUrl(request),
             StartupWizardCompleted = _configurationManager.CommonConfiguration.IsStartupWizardCompleted
         };
