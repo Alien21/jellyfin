@@ -53,7 +53,7 @@ public sealed class RewatchPlayStateTests : IDisposable
         Invoke(sessionManager, "OnPlaybackStart", user, episode);
         Assert.Equal(_previousPlayDate, data.LastPlayedDate);
 
-        Invoke(sessionManager, "OnPlaybackStopped", user, episode, stopPositionTicks, false);
+        Invoke(sessionManager, "OnPlaybackStopped", user, episode, stopPositionTicks, false, "rewatch-session");
         Assert.True(data.Played);
         Assert.Equal(expectDateUpdated, data.LastPlayedDate > _previousPlayDate);
     }
@@ -93,7 +93,8 @@ public sealed class RewatchPlayStateTests : IDisposable
             Mock.Of<IServerApplicationHost>(),
             Mock.Of<IDeviceManager>(),
             Mock.Of<IMediaSourceManager>(),
-            Mock.Of<IHostApplicationLifetime>());
+            Mock.Of<IHostApplicationLifetime>(),
+            Mock.Of<IFavoriteLifecycleService>());
     }
 
     private static void Invoke(Emby.Server.Implementations.Session.SessionManager sessionManager, string name, params object?[] args)

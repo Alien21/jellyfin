@@ -49,6 +49,7 @@ namespace Emby.Server.Implementations.Session
     public sealed class SessionManager : ISessionManager, IAsyncDisposable
     {
         private readonly IUserDataManager _userDataManager;
+        private readonly IFavoriteLifecycleService _favoriteLifecycleService;
         private readonly IServerConfigurationManager _config;
         private readonly ILogger<SessionManager> _logger;
         private readonly IEventManager _eventManager;
@@ -66,6 +67,9 @@ namespace Emby.Server.Implementations.Session
 
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _activeLiveStreamSessions
             = new(StringComparer.OrdinalIgnoreCase);
+
+        private readonly ConcurrentDictionary<string, (Guid ItemId, string Id, long? StartTicks)> _favoritePlaybackSessions
+            = new(StringComparer.Ordinal);
 
         private Timer _idleTimer;
         private Timer _inactiveTimer;
@@ -89,6 +93,7 @@ namespace Emby.Server.Implementations.Session
         /// <param name="deviceManager">Instance of <see cref="IDeviceManager"/> interface.</param>
         /// <param name="mediaSourceManager">Instance of <see cref="IMediaSourceManager"/> interface.</param>
         /// <param name="hostApplicationLifetime">Instance of <see cref="IHostApplicationLifetime"/> interface.</param>
+        /// <param name="favoriteLifecycleService">Instance of <see cref="IFavoriteLifecycleService"/> interface.</param>
         public SessionManager(
             ILogger<SessionManager> logger,
             IEventManager eventManager,
@@ -102,11 +107,13 @@ namespace Emby.Server.Implementations.Session
             IServerApplicationHost appHost,
             IDeviceManager deviceManager,
             IMediaSourceManager mediaSourceManager,
-            IHostApplicationLifetime hostApplicationLifetime)
+            IHostApplicationLifetime hostApplicationLifetime,
+            IFavoriteLifecycleService favoriteLifecycleService)
         {
             _logger = logger;
             _eventManager = eventManager;
             _userDataManager = userDataManager;
+            _favoriteLifecycleService = favoriteLifecycleService;
             _config = serverConfigurationManager;
             _libraryManager = libraryManager;
             _userManager = userManager;
@@ -207,6 +214,8 @@ namespace Emby.Server.Implementations.Session
 
         private async ValueTask OnSessionEnded(SessionInfo info)
         {
+            _favoritePlaybackSessions.TryRemove(info.Id, out _);
+
             EventHelper.QueueEventIfNotNull(
                 SessionEnded,
                 this,
@@ -756,6 +765,51 @@ namespace Emby.Server.Implementations.Session
             return libraryItem;
         }
 
+        private string GetPlaybackCompletionId(SessionInfo session, BaseItem item, string playSessionId, bool isPlaybackStart = false, long? playbackStartTimeTicks = null)
+        {
+            if (!string.IsNullOrEmpty(playSessionId))
+            {
+                _favoritePlaybackSessions.AddOrUpdate(
+                    session.Id,
+                    _ => (item.Id, playSessionId, playbackStartTimeTicks),
+                    (_, previous) => (item.Id, playSessionId, playbackStartTimeTicks
+                        ?? (previous.ItemId.Equals(item.Id) && previous.Id == playSessionId ? previous.StartTicks : null)));
+                return playSessionId;
+            }
+
+            // After restart an unidentified report may belong to a playback already completed.
+            // Only a witnessed start can create a random fallback for clients without start times.
+            if (!isPlaybackStart && !playbackStartTimeTicks.HasValue)
+            {
+                return _favoritePlaybackSessions.TryGetValue(session.Id, out var knownPlayback) && knownPlayback.ItemId.Equals(item.Id)
+                    ? knownPlayback.Id
+                    : null;
+            }
+
+            // Legacy clients omit PlaySessionId. Keep one token through progress and duplicate
+            // stop reports, and start a fresh token when that client plays the item again.
+            // A reported start time and the deterministic connection id also retain the token
+            // after restart, when the client resumes sending progress without another start.
+            string CreateId() => playbackStartTimeTicks.HasValue
+                ? string.Concat(
+                    "legacy/",
+                    session.Id,
+                    "/",
+                    item.Id.ToString("N", CultureInfo.InvariantCulture),
+                    "/",
+                    playbackStartTimeTicks.Value.ToString(CultureInfo.InvariantCulture))
+                : Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+
+            var playback = _favoritePlaybackSessions.AddOrUpdate(
+                session.Id,
+                _ => (item.Id, CreateId(), playbackStartTimeTicks),
+                (_, previous) => isPlaybackStart || !previous.ItemId.Equals(item.Id)
+                    || (playbackStartTimeTicks.HasValue && previous.StartTicks.HasValue && playbackStartTimeTicks != previous.StartTicks)
+                    ? (item.Id, CreateId(), playbackStartTimeTicks)
+                    : (previous.ItemId, previous.Id, previous.StartTicks ?? playbackStartTimeTicks));
+            return playback.Id;
+        }
+
         /// <summary>
         /// Used to report that playback has started for an item.
         /// </summary>
@@ -788,6 +842,7 @@ namespace Emby.Server.Implementations.Session
             if (libraryItem is not null)
             {
                 var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
+                GetPlaybackCompletionId(session, progressItem, info.PlaySessionId, true, info.PlaybackStartTimeTicks);
                 foreach (var user in users)
                 {
                     OnPlaybackStart(user, progressItem);
@@ -929,9 +984,10 @@ namespace Emby.Server.Implementations.Session
             if (libraryItem is not null && !isAutomated)
             {
                 var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
+                var completionId = GetPlaybackCompletionId(session, progressItem, info.PlaySessionId, playbackStartTimeTicks: info.PlaybackStartTimeTicks);
                 foreach (var user in users)
                 {
-                    OnPlaybackProgress(user, progressItem, info);
+                    OnPlaybackProgress(user, progressItem, info, completionId);
                 }
             }
 
@@ -968,17 +1024,18 @@ namespace Emby.Server.Implementations.Session
             StartCheckTimers();
         }
 
-        private void OnPlaybackProgress(User user, BaseItem item, PlaybackProgressInfo info)
+        private void OnPlaybackProgress(User user, BaseItem item, PlaybackProgressInfo info, string completionId)
         {
             var data = _userDataManager.GetUserData(user, item);
 
             var positionTicks = info.PositionTicks;
 
             var changed = false;
+            var playedToCompletion = false;
 
             if (positionTicks.HasValue)
             {
-                var playedToCompletion = _userDataManager.UpdatePlayState(item, data, positionTicks.Value);
+                playedToCompletion = _userDataManager.UpdatePlayState(item, data, positionTicks.Value);
                 if (playedToCompletion || data.PlaybackPositionTicks > 0)
                 {
                     data.LastPlayedDate = DateTime.UtcNow;
@@ -1003,6 +1060,11 @@ namespace Emby.Server.Implementations.Session
                 if (data.Played == true && item is Video playedVideo)
                 {
                     playedVideo.PropagatePlayedState(user, true);
+                }
+
+                if (playedToCompletion && completionId is not null)
+                {
+                    _favoriteLifecycleService.RecordPlaybackCompletion(user, item, completionId);
                 }
             }
 
@@ -1142,9 +1204,10 @@ namespace Emby.Server.Implementations.Session
             if (libraryItem is not null)
             {
                 var progressItem = GetProgressItem(libraryItem, info.MediaSourceId);
+                var completionId = GetPlaybackCompletionId(session, progressItem, info.PlaySessionId);
                 foreach (var user in users)
                 {
-                    playedToCompletion = OnPlaybackStopped(user, progressItem, info.PositionTicks, info.Failed);
+                    playedToCompletion = OnPlaybackStopped(user, progressItem, info.PositionTicks, info.Failed, completionId);
                 }
             }
 
@@ -1173,7 +1236,7 @@ namespace Emby.Server.Implementations.Session
             EventHelper.QueueEventIfNotNull(PlaybackStopped, this, eventArgs, _logger);
         }
 
-        private bool OnPlaybackStopped(User user, BaseItem item, long? positionTicks, bool playbackFailed)
+        private bool OnPlaybackStopped(User user, BaseItem item, long? positionTicks, bool playbackFailed, string playSessionId)
         {
             if (playbackFailed)
             {
@@ -1208,6 +1271,11 @@ namespace Emby.Server.Implementations.Session
             if (data.Played == true && item is Video playedVideo)
             {
                 playedVideo.PropagatePlayedState(user, true);
+            }
+
+            if (playedToCompletion && playSessionId is not null)
+            {
+                _favoriteLifecycleService.RecordPlaybackCompletion(user, item, playSessionId);
             }
 
             return playedToCompletion;

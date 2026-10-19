@@ -1165,6 +1165,13 @@ public class ItemsController : BaseJellyfinApiController
             _favoriteLifecycle.SetFavorite(user, item, requestedFavorite.Value);
         }
 
+        // Favorite changes can include an existing Played=true snapshot. Neither adding
+        // nor removing a favorite is a new viewing; a standalone Played=true does count.
+        if (userDataDto.Played == true && !requestedFavorite.HasValue)
+        {
+            _favoriteLifecycle.RecordMarkedPlayed(user, item);
+        }
+
         return _userDataRepository.GetUserDataDto(item, user);
     }
 

@@ -89,6 +89,11 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// </summary>
     public bool EnableFavoriteSyncAcrossLibraries { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether favorites are removed after a new watched event since being added.
+    /// </summary>
+    public bool EnableAutoRemoveFavoritesAfterWatching { get; set; } = false;
+
     public bool EnableNormalizedItemByNameIds { get; set; } = true;
 
     /// <summary>
