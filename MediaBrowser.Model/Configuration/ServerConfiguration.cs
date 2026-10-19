@@ -79,6 +79,11 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// </summary>
     public bool EnablePlaybackVersionSelection { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether clients should search all libraries from within a library.
+    /// </summary>
+    public bool EnableGlobalSearch { get; set; } = false;
+
     public bool EnableNormalizedItemByNameIds { get; set; } = true;
 
     /// <summary>

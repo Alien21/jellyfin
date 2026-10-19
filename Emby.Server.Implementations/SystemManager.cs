@@ -76,6 +76,7 @@ public class SystemManager : ISystemManager
             ServerName = _applicationHost.FriendlyName,
             EnableLibrarySourceDetails = _configurationManager.Configuration.EnableLibrarySourceDetails,
             EnablePlaybackVersionSelection = _configurationManager.Configuration.EnablePlaybackVersionSelection,
+            EnableGlobalSearch = _configurationManager.Configuration.EnableGlobalSearch,
             LocalAddress = _applicationHost.GetSmartApiUrl(request),
             StartupWizardCompleted = _configurationManager.CommonConfiguration.IsStartupWizardCompleted,
             SupportsLibraryMonitor = true,
@@ -121,6 +122,7 @@ public class SystemManager : ISystemManager
             ServerName = _applicationHost.FriendlyName,
             EnableLibrarySourceDetails = _configurationManager.Configuration.EnableLibrarySourceDetails,
             EnablePlaybackVersionSelection = _configurationManager.Configuration.EnablePlaybackVersionSelection,
+            EnableGlobalSearch = _configurationManager.Configuration.EnableGlobalSearch,
             LocalAddress = _applicationHost.GetSmartApiUrl(request),
             StartupWizardCompleted = _configurationManager.CommonConfiguration.IsStartupWizardCompleted
         };

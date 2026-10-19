@@ -30,6 +30,11 @@ namespace MediaBrowser.Model.System
         public bool EnablePlaybackVersionSelection { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether clients should search all libraries from within a library.
+        /// </summary>
+        public bool EnableGlobalSearch { get; set; }
+
+        /// <summary>
         /// Gets or sets the server version.
         /// </summary>
         /// <value>The version.</value>
