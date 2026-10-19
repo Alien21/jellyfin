@@ -94,6 +94,11 @@ public class ServerConfiguration : BaseApplicationConfiguration
     /// </summary>
     public bool EnableAutoRemoveFavoritesAfterWatching { get; set; } = false;
 
+    /// <summary>
+    /// Gets or sets a value indicating whether series must reach the configured minimum resume percentage before appearing in Next Up.
+    /// </summary>
+    public bool EnableNextUpResumeThreshold { get; set; } = false;
+
     public bool EnableNormalizedItemByNameIds { get; set; } = true;
 
     /// <summary>

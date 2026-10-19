@@ -6,6 +6,7 @@ using System.Linq;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -21,6 +22,7 @@ public class NextUpService : INextUpService
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IItemTypeLookup _itemTypeLookup;
     private readonly IItemQueryHelpers _queryHelpers;
+    private readonly IServerConfigurationManager _configurationManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="NextUpService"/> class.
@@ -28,14 +30,17 @@ public class NextUpService : INextUpService
     /// <param name="dbProvider">The database context factory.</param>
     /// <param name="itemTypeLookup">The item type lookup.</param>
     /// <param name="queryHelpers">The shared query helpers.</param>
+    /// <param name="configurationManager">The server configuration manager.</param>
     public NextUpService(
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IItemTypeLookup itemTypeLookup,
-        IItemQueryHelpers queryHelpers)
+        IItemQueryHelpers queryHelpers,
+        IServerConfigurationManager configurationManager)
     {
         _dbProvider = dbProvider;
         _itemTypeLookup = itemTypeLookup;
         _queryHelpers = queryHelpers;
+        _configurationManager = configurationManager;
     }
 
     /// <inheritdoc />
@@ -46,7 +51,7 @@ public class NextUpService : INextUpService
 
         using var context = _dbProvider.CreateDbContext();
 
-        var query = context.BaseItems
+        var episodeUserData = context.BaseItems
             .AsNoTracking()
             .Where(i => filter.TopParentIds.Contains(i.TopParentId!.Value))
             .Where(i => i.Type == _itemTypeLookup.BaseItemKindNames[BaseItemKind.Episode])
@@ -54,7 +59,21 @@ public class NextUpService : INextUpService
                 context.UserData.AsNoTracking().Where(e => e.ItemId != EF.Constant(BaseItemRepository.PlaceholderId)),
                 i => new { UserId = filter.User.Id, ItemId = i.Id },
                 u => new { u.UserId, u.ItemId },
-                (entity, data) => new { Item = entity, UserData = data })
+                (entity, data) => new { Item = entity, UserData = data });
+
+        var configuration = _configurationManager.Configuration;
+        if (configuration.EnableNextUpResumeThreshold)
+        {
+            // Playback start alone also records a date. Only watched episodes or resume progress
+            // that meets the current threshold qualify, including progress on alternate versions.
+            var minResumePct = configuration.MinResumePct;
+            episodeUserData = episodeUserData.Where(e => e.UserData.Played
+                || (e.UserData.PlaybackPositionTicks > 0
+                    && e.Item.RunTimeTicks > 0
+                    && (double)e.UserData.PlaybackPositionTicks * 100 >= (double)e.Item.RunTimeTicks.Value * minResumePct));
+        }
+
+        var query = episodeUserData
             .GroupBy(g => g.Item.SeriesPresentationUniqueKey)
             .Select(g => new { g.Key, LastPlayedDate = g.Max(u => u.UserData.LastPlayedDate) })
             .Where(g => g.Key != null && g.LastPlayedDate != null && g.LastPlayedDate >= dateCutoff)

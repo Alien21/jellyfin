@@ -4,7 +4,10 @@ using Emby.Server.Implementations.Data;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Server.Implementations.Item;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Model.Configuration;
+using Moq;
 using Xunit;
 using LinkedChildType = Jellyfin.Database.Implementations.Entities.LinkedChildType;
 
@@ -28,6 +31,8 @@ public sealed class NextUpServiceTests : SqliteDbTestFixture
     public NextUpServiceTests()
     {
         var itemTypeLookup = new ItemTypeLookup();
+        var configurationManager = new Mock<IServerConfigurationManager>();
+        configurationManager.Setup(c => c.Configuration).Returns(new ServerConfiguration());
 
         using (var context = CreateDbContext())
         {
@@ -37,7 +42,8 @@ public sealed class NextUpServiceTests : SqliteDbTestFixture
         _service = new NextUpService(
             CreateDbContextFactory(),
             itemTypeLookup,
-            CreateBaseItemRepository(itemTypeLookup));
+            CreateBaseItemRepository(itemTypeLookup),
+            configurationManager.Object);
     }
 
     [Fact]
