@@ -165,14 +165,19 @@ load_sandbox() {
         case "$*" in
             'show jellyfin -p LoadState --value') printf 'loaded\n' ;;
             'show jellyfin -p ActiveState --value') printf '%s\n' "$service_state" ;;
+            'show jellyfin -p MainPID --value') printf '%s\n' "$service_main_pid" ;;
+            'show jellyfin -p ControlPID --value') printf '%s\n' "$service_control_pid" ;;
             'is-active --quiet jellyfin') [[ "$service_state" == active ]] ;;
-            'stop jellyfin') service_state=inactive ;;
-            'start jellyfin') service_state=active ;;
+            'stop jellyfin')
+                service_state="$stop_service_state"; service_main_pid=0; service_control_pid=0
+                return "$stop_service_result" ;;
+            'start jellyfin') service_state=active; service_main_pid=123; service_control_pid=0 ;;
             *) printf 'Unexpected service call: %s\n' "$*" >&2; return 97 ;;
         esac
     }
-    inactive() { [[ "$service_state" == inactive ]]; }
     wait_ready() {
+        printf 'health-check\n' >> "$sandbox/events"
+        [[ "$service_state" == active ]] || return 1
         if [[ "$fail_health" == true ]]; then
             if [[ "$update_server" == true ]]; then
                 printf failed-config > "$CONFIG/system.xml"
@@ -197,7 +202,8 @@ load_sandbox() {
         cp -- "${1%/*}/state-fixture/config" "$CONFIG/system.xml"
         cp -- "${1%/*}/state-fixture/database" "$DATA/data/jellyfin.db"
     }
-    service_state=active; fail_health=false
+    service_state=active; service_main_pid=123; service_control_pid=0
+    stop_service_state=inactive; stop_service_result=0; fail_health=false
 }
 lock_check() (
     local kind="$1" marker=retained-lock-marker lock_inode= lock_digest= test_owner=0
@@ -286,10 +292,66 @@ assert_untouched() {
         printf 'Unselected component was touched: %s\n' "$component" >&2; return 1
     fi
 }
-transaction_check() (
-    local component="$1" failure="$2" action="$3"
-    prepare_sandbox "$1-$2-$3"
+service_inactive_check() (
+    source "$installer"
+    local test_state="$1" test_main_pid="$2" test_control_pid="$3"
+    local test_failure_property="$4" test_expected="$5" test_result=0
+    systemctl() {
+        local test_property
+        case "$*" in
+            'show jellyfin -p ActiveState --value') test_property=ActiveState; printf '%s\n' "$test_state" ;;
+            'show jellyfin -p MainPID --value') test_property=MainPID; printf '%s\n' "$test_main_pid" ;;
+            'show jellyfin -p ControlPID --value') test_property=ControlPID; printf '%s\n' "$test_control_pid" ;;
+            *) printf 'Unexpected inactive query: %s\n' "$*" >&2; return 97 ;;
+        esac
+        # A failed query may still print otherwise valid values.
+        [[ "$test_property" != "$test_failure_property" ]]
+    }
+    inactive || test_result=$?
+    if [[ "$test_expected" == true ]]; then
+        require test "$test_result" = 0
+    else
+        require test "$test_result" != 0
+    fi
+)
+
+stop_guard_check() (
+    local kind="$1" result=0 child
+    prepare_sandbox "stop-guard-$kind"
     load_sandbox
+    if [[ "$kind" == command-failed ]]; then
+        stop_service_state=failed
+        stop_service_result=1
+    else
+        stop_service_state=deactivating
+    fi
+    (main "$web_fixture") > "$sandbox/install-output" 2>&1 &
+    child=$!; wait "$child" || result=$?
+    require test "$result" = 1
+    require test "$(cat -- "$sandbox/app/jellyfin")" = old-server
+    require test "$(cat -- "$sandbox/web/index.html")" = old-web
+    if grep -Eq '^(move|backup-state|restore-state|health-check)' "$sandbox/events" ||
+            grep -Fxq -- "service"$'\t'"start jellyfin" "$sandbox/events"; then
+        printf 'Installation continued after service stop was rejected\n' >&2
+        return 1
+    fi
+    require grep -Fq 'AUTOMATIC RECOVERY INCOMPLETE.' "$sandbox/install-output"
+    require grep -Fxq -- "Current web directory: $WEB" "$sandbox/install-output"
+    local -a staged=("$sandbox"/web.new-*)
+    require test "${#staged[@]}" = 1
+    require test -d "${staged[0]}"
+    require grep -Fxq -- "Retained component path: ${staged[0]}" "$sandbox/install-output"
+    if grep -Eq 'Retained component path: .*\.previous-|Current server directory:|Retained binary/web paths:' "$sandbox/install-output"; then
+        printf 'Recovery diagnostics reported an unused or nonexistent component path\n' >&2
+        return 1
+    fi
+)
+
+transaction_check() (
+    local component="$1" failure="$2" action="$3" stopped_state="${4:-inactive}"
+    prepare_sandbox "$1-$2-$3-$stopped_state"
+    load_sandbox
+    stop_service_state="$stopped_state"
     local -a archives=() markers=()
     if [[ "$component" != web ]]; then archives+=("$server_fixture"); fi
     if [[ "$component" != server ]]; then archives+=("$web_fixture"); fi
@@ -299,6 +361,8 @@ transaction_check() (
     child=$!; wait "$child" || result=$?
     if [[ "$failure" == true ]]; then
         require test "$result" != 0
+        require grep -Fxq health-check "$sandbox/events"
+        require grep -Fq 'Previous selected components and required data state restored.' "$sandbox/install-output"
         require test "$(cat -- "$sandbox/app/jellyfin")" = old-server
         require test "$(cat -- "$sandbox/web/index.html")" = old-web
         if [[ "$component" == server ]]; then assert_untouched web old-web; fi
@@ -360,6 +424,20 @@ transaction_check() (
 )
 
 run_check syntax bash -n "$installer"
+for stopped_state in inactive failed; do
+    run_check "stopped-$stopped_state" service_inactive_check "$stopped_state" 0 0 '' true
+    run_check "stopped-$stopped_state-main-pid" service_inactive_check "$stopped_state" 123 0 '' false
+    run_check "stopped-$stopped_state-control-pid" service_inactive_check "$stopped_state" 0 456 '' false
+done
+for running_state in active activating deactivating reloading maintenance unknown; do
+    run_check "stopped-reject-$running_state" service_inactive_check "$running_state" 0 0 '' false
+done
+run_check stopped-reject-empty-state service_inactive_check '' 0 0 '' false
+run_check stopped-reject-empty-main-pid service_inactive_check inactive '' 0 '' false
+run_check stopped-reject-empty-control-pid service_inactive_check failed 0 '' '' false
+for failed_property in ActiveState MainPID ControlPID; do
+    run_check "stopped-query-failed-$failed_property" service_inactive_check inactive 0 0 "$failed_property" false
+done
 for lock_case in fresh retained-root retained-owner directory unexpected-owner busy; do
     run_check "lock-$lock_case" lock_check "$lock_case"
 done
@@ -375,3 +453,7 @@ for component in server web both; do
     run_check "rollback-$component" transaction_check "$component" false rollback
 done
 run_check rollback-legacy-both transaction_check both false legacy
+run_check install-web-stop-failed transaction_check web false install failed
+run_check recover-web-stop-failed transaction_check web true install failed
+run_check reject-stop-command-failed stop_guard_check command-failed
+run_check reject-stop-deactivating stop_guard_check deactivating

@@ -472,7 +472,14 @@ safe_move() {
 }
 
 inactive() {
-    [[ "$(systemctl show jellyfin -p ActiveState --value)" == inactive ]]
+    local state main_pid control_pid
+    state="$(systemctl show jellyfin -p ActiveState --value)" || return 1
+    # A completed stop can retain failed after a shutdown timeout/SIGKILL.
+    # Accept terminal states only when systemd tracks no main or control process.
+    case "$state" in inactive|failed) ;; *) return 1 ;; esac
+    main_pid="$(systemctl show jellyfin -p MainPID --value)" || return 1
+    control_pid="$(systemctl show jellyfin -p ControlPID --value)" || return 1
+    [[ "$main_pid" == 0 && "$control_pid" == 0 ]]
 }
 
 set_file_permissions() {
@@ -663,6 +670,16 @@ wait_ready() {
     return 1
 }
 
+report_retained_components() {
+    local path
+    if [[ "$update_server" == true ]]; then printf 'Current server directory: %s\n' "$BIN" >&2; fi
+    if [[ "$update_web" == true ]]; then printf 'Current web directory: %s\n' "$WEB" >&2; fi
+    for path in "$old_bin" "$old_web" "$recover_bin" "$recover_web" "$source_bin" "$source_web"; do
+        [[ -n "$path" && -e "$path" ]] || continue
+        printf 'Retained component path: %s\n' "$path" >&2
+    done
+}
+
 recover() {
     printf 'Deployment failed; restoring the state from before this operation.\n' >&2
     systemctl stop jellyfin || return 1
@@ -707,7 +724,7 @@ on_exit() {
             if [[ "$update_server" == true && "$backup_complete" == true ]]; then
                 printf 'Configuration/database snapshot: %s/state.tar\n' "$backup_dir" >&2
             fi
-            printf 'Retained binary/web paths: %s ; %s\n' "$old_bin" "$old_web" >&2
+            report_retained_components
         fi
     fi
     if (( result != 0 )); then
@@ -921,7 +938,7 @@ main() {
     if systemctl is-active --quiet jellyfin; then was_active=true; fi
     stopped=true
     systemctl stop jellyfin
-    inactive || die "Service did not become inactive"
+    inactive || die "Service did not stop: expected inactive/failed with MainPID=0 and ControlPID=0"
     if [[ "$update_server" == true ]]; then
         backup_state
         safe_move "$BIN" "$old_bin"
