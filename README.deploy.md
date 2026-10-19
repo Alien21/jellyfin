@@ -146,6 +146,13 @@ neprochází rekurzivně; obrázky a metadata v datech i cache a logy ponechá
 beze změny. Oprava běží pod instalačním zámkem a jeho existujícímu souboru
 nastaví `660`. Nepotřebuje archivy, nic nesestavuje a službu nerestartuje.
 
+Existující `/run/lock/jellyfin-local-install.lock` se otevírá pouze ke čtení;
+`flock` nad ním stále drží výhradní zámek. Soubor se nepřepisuje ani nenahrazuje,
+takže další běhy sdílejí stejný zámek i při vlastnictví `alien21:plex` a zapnuté
+linuxové ochraně `fs.protected_regular`. Pokud starší instalátor skončí na této
+cestě chybou `Permission denied`, nahraj opravený `install.sh` a spusť jej znovu.
+Archivy aplikace a webu kvůli této opravě není potřeba znovu sestavovat.
+
 ## Návrat na předchozí verzi
 
 ```bash

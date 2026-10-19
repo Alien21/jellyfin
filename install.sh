@@ -483,6 +483,28 @@ set_file_permissions() {
     chmod "$mode" -- "$target" || return 1
 }
 
+acquire_install_lock() {
+    assert_managed_path "$LOCK"
+    if [[ ! -e "$LOCK" ]]; then
+        # Create only a missing lock, without replacing a racing installer's file.
+        if ! (set -o noclobber; : >"$LOCK") 2>/dev/null; then
+            [[ -e "$LOCK" ]] || die "Cannot create installer lock: $LOCK"
+        fi
+    fi
+    assert_managed_path "$LOCK"
+    [[ -f "$LOCK" && ! -L "$LOCK" ]] || die "Expected a regular installer lock file: $LOCK"
+    case "$(stat -c %u -- "$LOCK")" in
+        0|"$owner_uid") ;;
+        *) die "Unexpected lock file owner" ;;
+    esac
+    # Retained locks belong to the installation owner. O_CREAT can be denied even
+    # to root in sticky /run/lock; flock supports an exclusive read-only descriptor.
+    # Keep the same file/inode so running installers continue to share one lock.
+    if ! { exec 9<"$LOCK"; }; then die "Cannot read installer lock: $LOCK"; fi
+    flock -n 9 || die "Another Jellyfin installation/rollback is running"
+    set_file_permissions "$LOCK" 660
+}
+
 set_tree_permissions() {
     local target="$1" directory_mode="$2" file_mode="$3" preserve_exec="${4:-false}"
     assert_managed_path "$target" || return 1
@@ -840,13 +862,7 @@ main() {
     if [[ "$check_only" == true ]]; then printf 'Check complete; no persistent changes made.\n'; return; fi
 
     umask 007
-    assert_managed_path "$LOCK"
-    if [[ -e "$LOCK" ]]; then
-        case "$(stat -c %u -- "$LOCK")" in 0|"$owner_uid") ;; *) die "Unexpected lock file owner" ;; esac
-    fi
-    exec 9>"$LOCK"
-    flock -n 9 || die "Another Jellyfin installation/rollback is running"
-    set_file_permissions "$LOCK" 660
+    acquire_install_lock
     if [[ "$mode" == permissions ]]; then
         fix_permissions
         printf 'Ownership and permissions repaired: alien21:plex. Jellyfin was not restarted.\n'

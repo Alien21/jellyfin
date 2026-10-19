@@ -199,6 +199,85 @@ load_sandbox() {
     }
     service_state=active; fail_health=false
 }
+lock_check() (
+    local kind="$1" marker=retained-lock-marker lock_inode= lock_digest= test_owner=0
+    prepare_sandbox "lock-$kind"
+    load_sandbox
+    owner_uid=1000
+    stat() { if [[ "$*" == '-c %u -- '* ]]; then printf '%s\n' "$test_owner"; else command stat "$@"; fi; }
+    flock() {
+        printf 'flock\t%s\n' "$*" >> "$sandbox/events"
+        [[ "$kind" != busy ]]
+    }
+    set_file_permissions() {
+        assert_managed_path "$1" || return 1
+        require test "$1" = "$LOCK"
+        printf 'lock-permissions\t%s\n' "$2" >> "$sandbox/events"
+    }
+
+    case "$kind" in
+        fresh) require test ! -e "$LOCK" ;;
+        directory) mkdir -- "$LOCK" ;;
+        retained-root|retained-owner|unexpected-owner|busy)
+            printf '%s\n' "$marker" > "$LOCK"
+            lock_inode="$(command stat -c %i -- "$LOCK")"
+            lock_digest="$(sha256sum -- "$LOCK")"
+            if [[ "$kind" == retained-owner ]]; then test_owner=1000; fi
+            if [[ "$kind" == unexpected-owner ]]; then test_owner=1001; fi ;;
+        *) printf 'Unknown lock test: %s\n' "$kind" >&2; return 2 ;;
+    esac
+
+    if [[ "$kind" == directory || "$kind" == unexpected-owner || "$kind" == busy ]]; then
+        local result=0 child
+        (
+            if [[ "$kind" == busy ]]; then main "$web_fixture"; else acquire_install_lock; fi
+            printf 'after-lock\n' >> "$sandbox/events"
+        ) > "$sandbox/lock-output" 2>&1 &
+        child=$!
+        wait "$child" || result=$?
+        require test "$result" != 0
+        if grep -Eq '^(lock-permissions|after-lock|permissions|move|backup-state)' "$sandbox/events" ||
+                grep -Eq '^service[[:space:]](start|stop) jellyfin$' "$sandbox/events"; then
+            printf 'Rejected lock changed permissions, installation, or service state\n' >&2
+            return 1
+        fi
+        if [[ "$kind" == busy ]]; then
+            require grep -Fxq -- "flock"$'\t'"-n 9" "$sandbox/events"
+            require test ! -e "$sandbox/backups"
+            assert_untouched app old-server
+            assert_untouched web old-web
+        else
+            require test ! -s "$sandbox/events"
+        fi
+        if [[ "$kind" == directory ]]; then
+            require test -d "$LOCK"
+        else
+            require test "$(command stat -c %i -- "$LOCK")" = "$lock_inode"
+            require test "$(sha256sum -- "$LOCK")" = "$lock_digest"
+        fi
+        return
+    fi
+
+    acquire_install_lock
+    require test -f "$LOCK"
+    require test ! -L "$LOCK"
+    if (printf unexpected-write >&9) 2>/dev/null; then
+        printf 'Installer lock descriptor is writable\n' >&2
+        return 1
+    fi
+    if [[ "$kind" == fresh ]]; then
+        require test ! -s "$LOCK"
+    else
+        require test "$(command stat -c %i -- "$LOCK")" = "$lock_inode"
+        require test "$(sha256sum -- "$LOCK")" = "$lock_digest"
+        local actual_marker
+        IFS= read -r actual_marker <&9
+        require test "$actual_marker" = "$marker"
+    fi
+    require test "$(cat -- "$sandbox/events")" = $'flock\t-n 9\nlock-permissions\t660'
+    exec 9<&-
+)
+
 assert_untouched() {
     local component="$1" content="$2" file=index.html
     if [[ "$component" == app ]]; then file=jellyfin; fi
@@ -281,6 +360,9 @@ transaction_check() (
 )
 
 run_check syntax bash -n "$installer"
+for lock_case in fresh retained-root retained-owner directory unexpected-owner busy; do
+    run_check "lock-$lock_case" lock_check "$lock_case"
+done
 for component in server web both; do
     run_check "discover-$component" selection_check "$component" false
     run_check "explicit-$component" selection_check "$component" true
