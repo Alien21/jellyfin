@@ -95,6 +95,12 @@ public class ServerConfiguration : BaseApplicationConfiguration
     public bool EnableGlobalSearch { get; set; } = false;
 
     /// <summary>
+    /// Gets or sets a value indicating whether metadata in the preferred language replaces
+    /// imported NFO text and is written back to existing NFO files.
+    /// </summary>
+    public bool EnableLocalizedNfoUpdates { get; set; } = false;
+
+    /// <summary>
     /// Gets or sets a value indicating whether favorites are synchronized across matching items in accessible libraries.
     /// </summary>
     public bool EnableFavoriteSyncAcrossLibraries { get; set; } = false;

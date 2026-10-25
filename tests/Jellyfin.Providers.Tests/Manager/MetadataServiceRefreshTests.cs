@@ -15,6 +15,7 @@ using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
+using MediaBrowser.Model.Providers;
 using MediaBrowser.Providers.Manager;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -56,6 +57,71 @@ namespace Jellyfin.Providers.Tests.Manager
             local.Verify(p => p.GetMetadata(It.IsAny<ItemInfo>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>()), localRead ? Times.Once : Times.Never);
             manager.Verify(p => p.SaveImage(item, "https://example.org/nfo.jpg", ImageType.Primary, null, It.IsAny<CancellationToken>()), localRead ? Times.Once : Times.Never);
             Assert.Equal(localRead ? "Local tagline" : "Remote tagline", item.Tagline);
+        }
+
+        [Theory]
+        [InlineData(false, false, "en")]
+        [InlineData(true, false, "en")]
+        [InlineData(true, true, "en")]
+        [InlineData(true, false, null)]
+        [InlineData(true, false, "cs")]
+        public async Task RefreshWithProviders_LocalizedNfoUpdatesAreOptInAndPreserveTranslatedValues(bool enabled, bool alreadyTranslated, string? baselineLanguage)
+        {
+            const string englishImage = "https://image.tmdb.org/t/p/original/english.jpg";
+            const string czechImage = "https://image.tmdb.org/t/p/original/czech.jpg";
+            var oldName = alreadyTranslated ? "Vlastní český název" : "English title";
+            var oldOverview = alreadyTranslated ? "Vlastní český popis" : "English overview";
+            var oldImage = alreadyTranslated ? czechImage : englishImage;
+            var item = new Movie { Name = oldName, Overview = oldOverview, PreferredMetadataLanguage = "cs" };
+            var local = new Mock<ILocalMetadataProvider<Movie>>();
+            var updater = local.As<ILocalizedMetadataUpdater>();
+            updater.Setup(p => p.UpdateLocalizedMetadataAsync(It.IsAny<BaseItem>(), It.IsAny<LocalizedMetadataUpdates>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+            local.Setup(p => p.Name).Returns("Nfo");
+            local.Setup(p => p.GetMetadata(It.IsAny<ItemInfo>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new MetadataResult<Movie>
+                {
+                    HasMetadata = true, Item = new Movie { Name = oldName, Overview = oldOverview },
+                    RemoteImages = [(oldImage, ImageType.Primary)]
+                });
+            var remote = new Mock<IRemoteMetadataProvider<Movie, MovieInfo>>();
+            remote.Setup(p => p.Name).Returns("Remote");
+            remote.Setup(p => p.GetMetadata(It.IsAny<MovieInfo>(), It.IsAny<CancellationToken>()))
+                .Returns<MovieInfo, CancellationToken>((info, _) => Task.FromResult(new MetadataResult<Movie>
+                {
+                    HasMetadata = true, ResultLanguage = info.MetadataLanguage == "en" ? baselineLanguage : info.MetadataLanguage,
+                    Item = new Movie
+                    {
+                        Name = info.MetadataLanguage == "en" ? "English title" : "Český název",
+                        Overview = info.MetadataLanguage == "en" ? "English overview" : "Český popis",
+                        OriginalTitle = "English title"
+                    }
+                }));
+            var manager = new Mock<IProviderManager>();
+            manager.Setup(p => p.SaveImage(It.IsAny<BaseItem>(), It.IsAny<string>(), It.IsAny<ImageType>(), It.IsAny<int?>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+            manager.Setup(p => p.GetAvailableRemoteImages(item, It.IsAny<RemoteImageQuery>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new[]
+                {
+                    new RemoteImageInfo { Type = ImageType.Primary, Url = czechImage, Language = "cs" },
+                    new RemoteImageInfo { Type = ImageType.Primary, Url = englishImage, Language = "en" }
+                });
+            var service = new TestMetadataService(manager.Object, new ServerConfiguration { EnableLocalizedNfoUpdates = enabled });
+            manager.Setup(p => p.GetMetadataProviders<Movie>(item, It.IsAny<LibraryOptions>())).Returns([remote.Object]);
+
+            await service.RefreshWithProvidersInternal(
+                new MetadataResult<Movie> { Item = item },
+                new MovieInfo { MetadataLanguage = "cs" },
+                new MetadataRefreshOptions(Mock.Of<IDirectoryService>())
+                {
+                    MetadataRefreshMode = MetadataRefreshMode.FullRefresh, ImageRefreshMode = MetadataRefreshMode.FullRefresh, ReplaceAllImages = true
+                },
+                [local.Object, remote.Object]);
+
+            var updated = enabled && !alreadyTranslated;
+            var textUpdated = updated && baselineLanguage == "en";
+            Assert.Equal(textUpdated ? "Český název" : oldName, item.Name);
+            Assert.Equal(textUpdated ? "Český popis" : oldOverview, item.Overview);
+            updater.Verify(p => p.UpdateLocalizedMetadataAsync(item, It.IsAny<LocalizedMetadataUpdates>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>()), updated ? Times.Once : Times.Never);
+            manager.Verify(p => p.SaveImage(item, updated ? czechImage : oldImage, ImageType.Primary, null, It.IsAny<CancellationToken>()), Times.Once);
         }
 
         [Theory]

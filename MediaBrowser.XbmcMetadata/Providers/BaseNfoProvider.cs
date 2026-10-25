@@ -11,7 +11,7 @@ using MediaBrowser.XbmcMetadata.Savers;
 
 namespace MediaBrowser.XbmcMetadata.Providers
 {
-    public abstract class BaseNfoProvider<T> : ILocalMetadataProvider<T>, IHasItemChangeMonitor
+    public abstract class BaseNfoProvider<T> : ILocalMetadataProvider<T>, IHasItemChangeMonitor, ILocalizedMetadataUpdater
         where T : BaseItem, new()
     {
         private readonly IFileSystem _fileSystem;
@@ -77,6 +77,20 @@ namespace MediaBrowser.XbmcMetadata.Providers
 
             // 1 minute tolerance to avoid detecting our own file writes
             return (fileTime - item.DateLastSaved) > TimeSpan.FromMinutes(1);
+        }
+
+        /// <inheritdoc />
+        public Task UpdateLocalizedMetadataAsync(BaseItem item, LocalizedMetadataUpdates updates, IDirectoryService directoryService, CancellationToken cancellationToken)
+        {
+            if (item.IsLocked || !updates.HasValues)
+            {
+                return Task.CompletedTask;
+            }
+
+            var file = GetXmlFile(new ItemInfo(item), directoryService);
+            return file is null
+                ? Task.CompletedTask
+                : LocalizedNfoUpdater.UpdateAsync(file.FullName, item, updates, cancellationToken);
         }
 
         protected abstract void Fetch(MetadataResult<T> result, string path, CancellationToken cancellationToken);

@@ -821,6 +821,23 @@ namespace MediaBrowser.Providers.Manager
 
                         if (localItem.HasMetadata)
                         {
+                            if (ServerConfigurationManager.Configuration?.EnableLocalizedNfoUpdates == true
+                                && provider is ILocalizedMetadataUpdater localizedUpdater)
+                            {
+                                try
+                                {
+                                    await UpdateLocalizedNfo(item, localItem, id, options, localizedUpdater, cancellationToken).ConfigureAwait(false);
+                                }
+                                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                                {
+                                    throw;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Logger.LogWarning(ex, "Could not update localized NFO values for {Item}", item.Path ?? item.Name);
+                                }
+                            }
+
                             foreach (var remoteImage in localItem.RemoteImages)
                             {
                                 try
@@ -931,6 +948,91 @@ namespace MediaBrowser.Providers.Manager
             }
 
             return refreshResult;
+        }
+
+        private async Task UpdateLocalizedNfo(
+            TItemType item,
+            MetadataResult<TItemType> local,
+            TIdType lookup,
+            MetadataRefreshOptions options,
+            ILocalizedMetadataUpdater updater,
+            CancellationToken cancellationToken)
+        {
+            var language = lookup.MetadataLanguage;
+            if (item.IsLocked || local.Item is null || local.Item.IsLocked || string.IsNullOrWhiteSpace(language))
+            {
+                return;
+            }
+
+            var updates = new LocalizedMetadataUpdates();
+            MergeNewData(local.Item, lookup);
+            // Localization also runs during ordinary scans that only detected an NFO change, when
+            // the regular refresh provider list may have excluded unchanged remote providers.
+            var configuredProviders = ProviderManager.GetMetadataProviders<TItemType>(item, LibraryManager.GetLibraryOptions(item));
+            foreach (var remote in configuredProviders.OfType<IRemoteMetadataProvider<TItemType, TIdType>>())
+            {
+                try
+                {
+                    var translated = await remote.GetMetadata(lookup, cancellationToken).ConfigureAwait(false);
+                    if (!translated.HasMetadata || translated.Item is null || string.IsNullOrWhiteSpace(translated.ResultLanguage)
+                        || !MetadataLanguageUtils.MatchesPreferredLanguage(translated.ResultLanguage, language))
+                    {
+                        continue;
+                    }
+
+                    // A language label alone cannot establish that an existing NFO value is foreign.
+                    // Compare the same provider's English response before changing an existing value.
+                    lookup.MetadataLanguage = "en";
+                    var untranslated = await remote.GetMetadata(lookup, cancellationToken).ConfigureAwait(false);
+                    if (untranslated.HasMetadata && untranslated.Item is not null
+                        && !string.IsNullOrWhiteSpace(untranslated.ResultLanguage)
+                        && MetadataLanguageUtils.MatchesPreferredLanguage(untranslated.ResultLanguage, "en"))
+                    {
+                        LocalizedMetadataSelector.AddTextUpdates(local.Item, translated.Item, untranslated.Item, updates);
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "Could not check localized NFO values for {Item} with {Provider}", item.Path ?? item.Name, remote.Name);
+                }
+                finally
+                {
+                    lookup.MetadataLanguage = language;
+                }
+            }
+
+            if (local.RemoteImages.Count > 0)
+            {
+                var images = await ProviderManager.GetAvailableRemoteImages(
+                    item,
+                    new MediaBrowser.Model.Providers.RemoteImageQuery(string.Empty) { IncludeAllLanguages = true },
+                    cancellationToken).ConfigureAwait(false);
+                updates.Images = LocalizedMetadataSelector.GetImageUpdates(local.RemoteImages, images, language);
+            }
+
+            if (!updates.HasValues)
+            {
+                return;
+            }
+
+            await updater.UpdateLocalizedMetadataAsync(item, updates, options.DirectoryService, cancellationToken).ConfigureAwait(false);
+            LocalizedMetadataSelector.ApplyTextUpdates(local.Item, updates);
+            LocalizedMetadataSelector.ApplyTextUpdates(item, updates);
+            if (updates.Images is not null)
+            {
+                foreach (var image in updates.Images)
+                {
+                    var index = local.RemoteImages.FindIndex(old => old.Type == image.Type && string.Equals(old.Url, image.OriginalUrl, StringComparison.Ordinal));
+                    if (index >= 0)
+                    {
+                        local.RemoteImages[index] = (image.Url, image.Type);
+                    }
+                }
+            }
         }
 
         private async Task RunCustomProvider(ICustomMetadataProvider<TItemType> provider, TItemType item, string logName, MetadataRefreshOptions options, RefreshResult refreshResult, CancellationToken cancellationToken)
