@@ -143,7 +143,7 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
         }
     }
 
-    private static bool IsSupported(BaseItem item) => item is Movie or Episode or Series or Season;
+    private static bool IsSupported(BaseItem item) => item is Movie or Episode or Series or Season or BoxSet;
 
     private bool IsFavorite(User user, BaseItem item) => _userData.GetUserData(user, item)?.IsFavorite == true;
 
@@ -161,7 +161,7 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
     private IReadOnlyList<BaseItem> GetFavorites(User user) => _library.GetItemList(new InternalItemsQuery(user)
     {
         IsFavorite = true,
-        IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Episode, BaseItemKind.Series, BaseItemKind.Season },
+        IncludeItemTypes = new[] { BaseItemKind.Movie, BaseItemKind.Episode, BaseItemKind.Series, BaseItemKind.Season, BaseItemKind.BoxSet },
         IsVirtualItem = false,
         Recursive = true,
         GroupByPresentationUniqueKey = false,
@@ -175,11 +175,17 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
         var cycle = _state.Cycles.FirstOrDefault(entry => entry.UserId.Equals(user.Id) && entry.ItemIds.Overlaps(ids));
         if (cycle is null)
         {
-            cycle = new FavoriteCycle { UserId = user.Id, IsContainer = item is Series or Season };
+            cycle = new FavoriteCycle { UserId = user.Id, IsContainer = item is Series or Season or BoxSet };
             _state.Cycles.Add(cycle);
         }
 
         cycle.ItemIds.UnionWith(ids);
+        if (item is BoxSet collection)
+        {
+            RefreshCollectionUnits(user, collection, cycle);
+            return cycle;
+        }
+
         if (!cycle.IsContainer && item is not Episode)
         {
             return cycle;
@@ -271,6 +277,72 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
         return cycle;
     }
 
+    private void RefreshCollectionUnits(User user, BoxSet collection, FavoriteCycle cycle)
+    {
+        var previous = cycle.Units;
+        var units = new List<WatchUnit>();
+        var members = _matcher.GetCollectionItems(user, collection);
+        cycle.SeriesIds = GetSeriesIds(user, members);
+        foreach (var member in members)
+        {
+            var copies = _matcher.GetEquivalentItems(user, member);
+            var ids = copies.Select(copy => copy.Id).ToHashSet();
+            ids.Add(member.Id);
+            var seriesIds = GetSeriesIds(user, copies);
+            if (member is Episode episode && episode.ParentIndexNumber.HasValue && episode.IndexNumber.HasValue && seriesIds.Count > 0)
+            {
+                var last = Math.Max(episode.IndexNumber.Value, episode.IndexNumberEnd ?? episode.IndexNumber.Value);
+                for (var number = episode.IndexNumber.Value; ; number++)
+                {
+                    var episodeUnit = units.FirstOrDefault(unit => unit.SeasonNumber == episode.ParentIndexNumber
+                        && unit.EpisodeNumber == number && unit.SeriesIds.Overlaps(seriesIds));
+                    if (episodeUnit is null)
+                    {
+                        episodeUnit = new WatchUnit { SeasonNumber = episode.ParentIndexNumber, EpisodeNumber = number };
+                        units.Add(episodeUnit);
+                    }
+
+                    episodeUnit.SeriesIds.UnionWith(seriesIds);
+                    episodeUnit.ItemIds.UnionWith(ids);
+                    foreach (var alias in previous.Where(unit => unit.SeasonNumber == episode.ParentIndexNumber
+                        && unit.EpisodeNumber == number && unit.SeriesIds.Overlaps(seriesIds)))
+                    {
+                        episodeUnit.Completed |= alias.Completed;
+                        episodeUnit.ItemIds.UnionWith(alias.ItemIds);
+                    }
+
+                    if (number == last)
+                    {
+                        break;
+                    }
+                }
+
+                continue;
+            }
+
+            var unit = new WatchUnit { ItemIds = ids };
+
+            // One viewing of a film qualifies for all of its library copies. Preserve a
+            // completed logical member when a collection gains or loses another copy.
+            foreach (var alias in previous.Where(alias => alias.ItemIds.Overlaps(ids)))
+            {
+                unit.Completed |= alias.Completed;
+                unit.ItemIds.UnionWith(alias.ItemIds);
+            }
+
+            foreach (var duplicate in units.Where(existing => existing.ItemIds.Overlaps(unit.ItemIds)).ToArray())
+            {
+                unit.Completed |= duplicate.Completed;
+                unit.ItemIds.UnionWith(duplicate.ItemIds);
+                units.Remove(duplicate);
+            }
+
+            units.Add(unit);
+        }
+
+        cycle.Units = units;
+    }
+
     private HashSet<Guid> GetSeriesIds(User user, IEnumerable<BaseItem> items)
     {
         var ids = new HashSet<Guid>();
@@ -315,13 +387,17 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
 
         var copies = _matcher.GetEquivalentItems(user, item);
         var directIds = copies.Select(copy => copy.Id).ToHashSet();
-        var episodes = item is Series or Season ? _matcher.GetEpisodes(user, item) : item is Episode episode ? new[] { episode } : Array.Empty<Episode>();
+        var collectionItems = item is BoxSet collection ? _matcher.GetCollectionItems(user, collection) : Array.Empty<BaseItem>();
+        var episodes = item is Series or Season ? _matcher.GetEpisodes(user, item)
+            : item is Episode episode ? new[] { episode } : collectionItems.OfType<Episode>().ToArray();
         var viewedEpisodes = episodes.Select(viewedEpisode => new
         {
             Episode = viewedEpisode,
             Ids = _matcher.GetEquivalentItems(user, viewedEpisode).Select(copy => copy.Id).ToHashSet()
         }).ToArray();
-        var viewedIds = viewedEpisodes.SelectMany(viewing => viewing.Ids).Concat(directIds).ToHashSet();
+        var viewedMovieIds = collectionItems.OfType<Movie>()
+            .SelectMany(movie => _matcher.GetEquivalentItems(user, movie).Select(copy => copy.Id));
+        var viewedIds = viewedEpisodes.SelectMany(viewing => viewing.Ids).Concat(viewedMovieIds).Concat(directIds).ToHashSet();
         var seriesIds = GetSeriesIds(user, copies.Concat(episodes));
 
         // Initialize and refresh only favorites related to this viewing event. An unrelated
@@ -330,6 +406,9 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
         {
             var existing = _state.Cycles.FirstOrDefault(cycle => cycle.UserId.Equals(user.Id) && cycle.ItemIds.Contains(favorite.Id));
             var related = viewedIds.Contains(favorite.Id)
+                // Refresh collection membership even for an existing favorite that has not
+                // been tracked yet, or a film that was added after its previous viewing.
+                || favorite is BoxSet
                 || (favorite is Series series && seriesIds.Contains(series.Id))
                 || (favorite is Season season && seriesIds.Contains(season.SeriesId))
                 || (favorite is Episode favoriteEpisode
@@ -363,7 +442,7 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
 
             if (!cycle.IsContainer && cycle.Units.Count == 0)
             {
-                if (viewedEpisodes.Any(viewing => cycle.ItemIds.Overlaps(viewing.Ids)))
+                if (cycle.ItemIds.Overlaps(viewedIds))
                 {
                     cycle.Completed = true;
                 }
@@ -371,7 +450,7 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
                 continue;
             }
 
-            if (viewedEpisodes.Length == 0)
+            if (viewedEpisodes.Length == 0 && item is not Movie && collectionItems.Count == 0)
             {
                 continue;
             }
@@ -383,9 +462,9 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
 
             foreach (var unit in cycle.Units.Where(unit => !unit.Completed))
             {
-                unit.Completed = viewedEpisodes.Any(viewing => unit.ItemIds.Overlaps(viewing.Ids)
+                unit.Completed = unit.ItemIds.Overlaps(viewedIds) || viewedEpisodes.Any(viewing => unit.ItemIds.Overlaps(viewing.Ids)
                     || (unit.EpisodeNumber.HasValue
-                        && cycle.SeriesIds.Contains(viewing.Episode.SeriesId)
+                        && (unit.SeriesIds.Count > 0 ? unit.SeriesIds : cycle.SeriesIds).Contains(viewing.Episode.SeriesId)
                         && unit.SeasonNumber == viewing.Episode.ParentIndexNumber
                         && viewing.Episode.IndexNumber.HasValue
                         && unit.EpisodeNumber >= viewing.Episode.IndexNumber
@@ -513,6 +592,8 @@ public sealed class FavoriteLifecycleService : IFavoriteLifecycleService
         public int? SeasonNumber { get; set; }
 
         public int? EpisodeNumber { get; set; }
+
+        public HashSet<Guid> SeriesIds { get; set; } = new();
 
         public bool Completed { get; set; }
     }

@@ -8,6 +8,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
 using Moq;
 using Xunit;
@@ -162,6 +163,77 @@ public sealed class FavoriteItemMatcherTests
         Add(new Episode { SeriesId = series.Id, ParentIndexNumber = 1, IndexNumber = 1 });
 
         Assert.Equal(2, Assert.Single(_matcher.GetEpisodes(_user, season)).ParentIndexNumber);
+    }
+
+    [Fact]
+    public void GetCollectionItems_UsesUserScopeWithoutFilteringPlayedAndExcludesExtras()
+    {
+        var movie = Add(new Movie());
+        var episode = Add(new Episode());
+        var extra = Add(new Movie { ExtraType = ExtraType.Trailer });
+        var virtualMovie = Add(new Movie { IsVirtualItem = true });
+        var virtualEpisode = Add(new Episode { IsVirtualItem = true });
+        var collection = Collection(movie, episode, extra, virtualMovie, virtualEpisode, new Folder());
+
+        var items = _matcher.GetCollectionItems(_user, collection.Object);
+
+        Assert.Equal(new[] { movie.Id, episode.Id }.Order(), items.Select(item => item.Id).Order());
+        collection.Verify(value => value.GetChildren(_user, true, It.Is<InternalItemsQuery>(query =>
+            query.User == _user && query.IsPlayed == null && query.IsVirtualItem == false
+            && !query.GroupByPresentationUniqueKey && query.IncludeAlternateVersions
+            && query.DtoOptions.ContainsField(ItemFields.ProviderIds))), Times.Once);
+    }
+
+    [Fact]
+    public void GetCollectionItems_NestedCycleTerminatesAndKeepsDistinctLibraryCopies()
+    {
+        var first = Add(new Movie { ProviderIds = Ids(("Tmdb", "17")) });
+        var copy = Add(new Movie { ProviderIds = Ids(("Tmdb", "17")) });
+        var collection = Collection();
+        var nested = Collection(first, copy, collection.Object);
+        collection.Setup(value => value.GetChildren(_user, true, It.IsAny<InternalItemsQuery>()))
+            .Returns(new BaseItem[] { first, nested.Object, nested.Object });
+
+        var items = _matcher.GetCollectionItems(_user, collection.Object);
+
+        Assert.Equal(new[] { first.Id, copy.Id }.Order(), items.Select(item => item.Id).Order());
+        collection.Verify(value => value.GetChildren(_user, true, It.IsAny<InternalItemsQuery>()), Times.Once);
+        nested.Verify(value => value.GetChildren(_user, true, It.IsAny<InternalItemsQuery>()), Times.Once);
+    }
+
+    [Fact]
+    public void GetCollectionItems_SeriesAndSeasonExpandToAvailableEpisodesWithoutDuplicates()
+    {
+        var series = Add(new Series());
+        var season = Add(new Season { SeriesId = series.Id, IndexNumber = 2 });
+        var first = Add(new Episode { SeriesId = series.Id, ParentIndexNumber = 1, IndexNumber = 1 });
+        var second = Add(new Episode { SeriesId = series.Id, SeasonId = season.Id, ParentIndexNumber = 2, IndexNumber = 1 });
+        Add(new Episode { SeriesId = series.Id, ParentIndexNumber = 2, IndexNumber = 2, IsVirtualItem = true });
+        var otherSeries = Add(new Series());
+        Add(new Episode { SeriesId = otherSeries.Id, ParentIndexNumber = 1, IndexNumber = 1 });
+        var collection = Collection(series, season);
+
+        var items = _matcher.GetCollectionItems(_user, collection.Object);
+
+        Assert.Equal(new[] { first.Id, second.Id }.Order(), items.Select(item => item.Id).Order());
+    }
+
+    [Fact]
+    public void Collections_SharedProviderIdDoesNotSynchronizeSeparateCollections()
+    {
+        var collection = Add(new BoxSet { ProviderIds = Ids(("Tmdb", "17")) });
+        Add(new BoxSet { ProviderIds = Ids(("Tmdb", "17")) });
+
+        Assert.Same(collection, Assert.Single(_matcher.GetEquivalentItems(_user, collection)));
+        _library.Verify(value => value.GetItemList(It.IsAny<InternalItemsQuery>()), Times.Never());
+    }
+
+    private Mock<BoxSet> Collection(params BaseItem[] children)
+    {
+        var collection = new Mock<BoxSet>();
+        collection.Object.Id = Guid.NewGuid();
+        collection.Setup(value => value.GetChildren(_user, true, It.IsAny<InternalItemsQuery>())).Returns(children);
+        return collection;
     }
 
     private static Dictionary<string, string> Ids(params (string Provider, string Id)[] values)

@@ -153,6 +153,65 @@ public sealed class FavoriteItemMatcher : IFavoriteItemMatcher
             .ToList();
     }
 
+    /// <inheritdoc />
+    public IReadOnlyList<BaseItem> GetCollectionItems(User user, BoxSet collection)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentNullException.ThrowIfNull(collection);
+
+        var pending = new Queue<BoxSet>();
+        var visited = new HashSet<Guid>();
+        var items = new Dictionary<Guid, BaseItem>();
+        pending.Enqueue(collection);
+        while (pending.TryDequeue(out var current))
+        {
+            if (!visited.Add(current.Id))
+            {
+                continue;
+            }
+
+            var query = new InternalItemsQuery(user)
+            {
+                IsVirtualItem = false,
+                GroupByPresentationUniqueKey = false,
+                IncludeAlternateVersions = true,
+                EnableTotalRecordCount = false,
+                DtoOptions = new DtoOptions
+                {
+                    Fields = [ItemFields.ProviderIds],
+                    EnableImages = false
+                }
+            };
+            foreach (var child in current.GetChildren(user, true, query))
+            {
+                if (child.IsVirtualItem)
+                {
+                    continue;
+                }
+
+                switch (child)
+                {
+                    case Movie { ExtraType: null }:
+                    case Episode:
+                        items.TryAdd(child.Id, child);
+                        break;
+                    case Series or Season:
+                        foreach (var episode in GetEpisodes(user, child))
+                        {
+                            items.TryAdd(episode.Id, episode);
+                        }
+
+                        break;
+                    case BoxSet nested:
+                        pending.Enqueue(nested);
+                        break;
+                }
+            }
+        }
+
+        return items.Values.ToArray();
+    }
+
     private static bool IsSupported(BaseItem item)
         => item is Movie { ExtraType: null } or Series or Season or Episode;
 

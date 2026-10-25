@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 
 namespace MediaBrowser.Controller.Library;
@@ -32,4 +33,12 @@ public interface IFavoriteItemMatcher
     /// <param name="container">The series or season.</param>
     /// <returns>One representative of each available episode, including distinct combined-episode ranges.</returns>
     IReadOnlyList<Episode> GetEpisodes(User user, BaseItem container);
+
+    /// <summary>
+    /// Gets available playable members of a collection, including nested collections and television containers.
+    /// </summary>
+    /// <param name="user">The user whose library access applies.</param>
+    /// <param name="collection">The collection.</param>
+    /// <returns>The available movies and episodes, with no duplicate item IDs.</returns>
+    IReadOnlyList<BaseItem> GetCollectionItems(User user, BoxSet collection);
 }

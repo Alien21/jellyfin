@@ -26,6 +26,7 @@ public sealed class FavoriteLifecycleServiceTests : IDisposable
     private readonly Dictionary<(Guid User, Guid Item), UserItemData> _data = new();
     private readonly Dictionary<Guid, IReadOnlyList<BaseItem>> _copies = new();
     private readonly Dictionary<Guid, IReadOnlyList<Episode>> _episodes = new();
+    private readonly Dictionary<Guid, IReadOnlyList<BaseItem>> _collections = new();
     private readonly Mock<ILibraryManager> _library = new();
     private readonly Mock<IUserDataManager> _userData = new();
     private readonly Mock<IFavoriteItemMatcher> _matcher = new();
@@ -40,7 +41,9 @@ public sealed class FavoriteLifecycleServiceTests : IDisposable
         _configuration.SetupGet(value => value.Configuration).Returns(_settings);
         _configuration.SetupGet(value => value.ApplicationPaths).Returns(paths.Object);
         _library.Setup(value => value.GetItemList(It.IsAny<InternalItemsQuery>()))
-            .Returns((InternalItemsQuery query) => _items.Values.Where(item => Data(query.User!, item).IsFavorite).ToArray());
+            .Returns((InternalItemsQuery query) => _items.Values
+                .Where(item => query.IncludeItemTypes.Contains(item.GetBaseItemKind()) && Data(query.User!, item).IsFavorite)
+                .ToArray());
         _library.Setup(value => value.GetItemById<BaseItem>(It.IsAny<Guid>(), It.IsAny<User>()))
             .Returns((Guid id, User user) => _items.GetValueOrDefault(id));
         _userData.Setup(value => value.GetUserData(It.IsAny<User>(), It.IsAny<BaseItem>()))
@@ -57,6 +60,8 @@ public sealed class FavoriteLifecycleServiceTests : IDisposable
             .Returns((User user, BaseItem item) => _copies.GetValueOrDefault(item.Id) ?? new[] { item });
         _matcher.Setup(value => value.GetEpisodes(It.IsAny<User>(), It.IsAny<BaseItem>()))
             .Returns((User user, BaseItem item) => _episodes.GetValueOrDefault(item.Id) ?? Array.Empty<Episode>());
+        _matcher.Setup(value => value.GetCollectionItems(It.IsAny<User>(), It.IsAny<BoxSet>()))
+            .Returns((User user, BoxSet collection) => _collections.GetValueOrDefault(collection.Id) ?? Array.Empty<BaseItem>());
     }
 
     [Fact]
@@ -236,6 +241,199 @@ public sealed class FavoriteLifecycleServiceTests : IDisposable
         Assert.All(series, copy => Assert.True(Data(copy).IsFavorite));
         service.RecordMarkedPlayed(_user, extra);
         Assert.All(series, copy => Assert.False(Data(copy).IsFavorite));
+    }
+
+    [Fact]
+    public void Collection_NewFullCycleCountsAnyMovieCopyAndSurvivesRestart()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var first = Movies(2);
+        var second = Movies(2);
+        var collection = Add(new BoxSet());
+        var members = first.Cast<BaseItem>().Concat(second).ToArray();
+        _collections[collection.Id] = members;
+        foreach (var member in members)
+        {
+            Data(member).Played = true;
+        }
+
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.RecordPlaybackCompletion(_user, first[1], "first-film");
+        Assert.True(Data(collection).IsFavorite);
+        Assert.All(members, member => Assert.False(Data(member).IsFavorite));
+
+        service = Service();
+        service.RecordPlaybackCompletion(_user, second[0], "second-film");
+
+        Assert.False(Data(collection).IsFavorite);
+        Assert.Same(members, _collections[collection.Id]);
+        Assert.All(members, member => Assert.True(Data(member).Played));
+    }
+
+    [Fact]
+    public void ExistingCollection_InitializesOnViewingAndKeepsOtherUsersFavorites()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var first = Movies(1);
+        var second = Movies(1);
+        var unrelated = Movies(1);
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { first[0], second[0] };
+        var other = new User("other", "auth", "reset") { Id = Guid.NewGuid() };
+        Data(collection).IsFavorite = true;
+        Data(other, collection).IsFavorite = true;
+        var service = Service();
+
+        service.RecordPlaybackCompletion(_user, unrelated[0], "unrelated-film");
+        service.RecordPlaybackCompletion(_user, first[0], "first-film");
+        Assert.True(Data(collection).IsFavorite);
+        service.RecordMarkedPlayed(_user, second[0]);
+
+        Assert.False(Data(collection).IsFavorite);
+        Assert.True(Data(other, collection).IsFavorite);
+    }
+
+    [Fact]
+    public void Collection_NewMemberMustBeViewedWhileDeletedMemberDoesNotBlockCompletion()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var first = Movies(1)[0];
+        var second = Movies(1)[0];
+        var removed = Movies(1)[0];
+        var imported = Movies(1)[0];
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { first, second, removed };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.RecordMarkedPlayed(_user, first);
+        _collections[collection.Id] = new BaseItem[] { first, second, imported };
+
+        service.RecordMarkedPlayed(_user, second);
+        Assert.True(Data(collection).IsFavorite);
+        service.RecordMarkedPlayed(_user, imported);
+
+        Assert.False(Data(collection).IsFavorite);
+    }
+
+    [Fact]
+    public void Collection_RefavoritingRequiresAnotherFullCycleAndIgnoresDuplicateReports()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var first = Movies(1)[0];
+        var second = Movies(1)[0];
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { first, second };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.RecordPlaybackCompletion(_user, first, "first-old");
+        service.RecordPlaybackCompletion(_user, second, "second-old");
+        Assert.False(Data(collection).IsFavorite);
+        service.SetFavorite(_user, collection, true);
+        service = Service();
+
+        service.RecordPlaybackCompletion(_user, first, "first-old");
+        service.RecordPlaybackCompletion(_user, second, "second-new");
+        Assert.True(Data(collection).IsFavorite);
+        service.RecordPlaybackCompletion(_user, first, "first-new");
+
+        Assert.False(Data(collection).IsFavorite);
+    }
+
+    [Fact]
+    public void ManualWholeCollection_CompletesItsFavoriteMoviesAndOverlappingCollection()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var first = Movies(2);
+        var second = Movies(1)[0];
+        var collection = Add(new BoxSet());
+        var overlapping = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { first[0], second };
+        _collections[overlapping.Id] = new BaseItem[] { first[1], second };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.SetFavorite(_user, overlapping, true);
+        service.SetFavorite(_user, first[1], true);
+
+        service.RecordMarkedPlayed(_user, collection);
+
+        Assert.False(Data(collection).IsFavorite);
+        Assert.False(Data(overlapping).IsFavorite);
+        Assert.All(first, copy => Assert.False(Data(copy).IsFavorite));
+    }
+
+    [Fact]
+    public void Collection_EmptyCollectionStaysFavoriteOnUnrelatedPlayback()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var collection = Add(new BoxSet());
+        var unrelated = Movies(1)[0];
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+
+        service.RecordPlaybackCompletion(_user, unrelated, "unrelated-film");
+
+        Assert.True(Data(collection).IsFavorite);
+    }
+
+    [Fact]
+    public void MixedCollection_CompoundEpisodeCountsBothEpisodesButNotAnotherSeries()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var (series, episodes) = Television();
+        var otherSeries = Add(new Series());
+        var otherEpisode = Add(new Episode { SeriesId = otherSeries.Id, ParentIndexNumber = 1, IndexNumber = 1 });
+        var compound = Add(new Episode { SeriesId = series[1].Id, ParentIndexNumber = 1, IndexNumber = 1, IndexNumberEnd = 2 });
+        var movie = Movies(1)[0];
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { movie, episodes[0], episodes[1], otherEpisode };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.RecordPlaybackCompletion(_user, movie, "film");
+        service.RecordPlaybackCompletion(_user, compound, "compound-episode");
+        Assert.True(Data(collection).IsFavorite);
+
+        service.RecordPlaybackCompletion(_user, otherEpisode, "other-series");
+
+        Assert.False(Data(collection).IsFavorite);
+    }
+
+    [Fact]
+    public void Collection_CombinedAndSeparateEpisodeCopiesRequireBothLogicalEpisodes()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var (series, episodes) = Television();
+        var compound = Add(new Episode { SeriesId = series[0].Id, ParentIndexNumber = 1, IndexNumber = 1, IndexNumberEnd = 2 });
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { compound, episodes[2], episodes[3] };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.RecordPlaybackCompletion(_user, episodes[2], "first-separate");
+        Assert.True(Data(collection).IsFavorite);
+        service = Service();
+
+        service.RecordPlaybackCompletion(_user, episodes[3], "second-separate");
+
+        Assert.False(Data(collection).IsFavorite);
+    }
+
+    [Fact]
+    public void Collection_EpisodesWithoutSeriesMetadataKeepTheirProgressByItemId()
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = true;
+        var first = Add(new Episode { ParentIndexNumber = 1, IndexNumber = 1 });
+        var second = Add(new Episode { ParentIndexNumber = 1, IndexNumber = 2 });
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { first, second };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+        service.RecordMarkedPlayed(_user, first);
+        Assert.True(Data(collection).IsFavorite);
+        service = Service();
+
+        service.RecordMarkedPlayed(_user, second);
+
+        Assert.False(Data(collection).IsFavorite);
     }
 
     [Fact]
