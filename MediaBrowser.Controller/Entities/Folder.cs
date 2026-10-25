@@ -416,6 +416,8 @@ namespace MediaBrowser.Controller.Entities
 
         private async Task ValidateChildrenInternal2(IProgress<double> progress, bool recursive, bool refreshChildMetadata, bool allowRemoveRoot, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
+            var libraryScanProgress = progress as ILibraryScanProgress;
+
             if (!IsLibraryFolderAccessible(directoryService, this, allowRemoveRoot))
             {
                 return;
@@ -767,7 +769,8 @@ namespace MediaBrowser.Controller.Entities
                     validChildrenNeedGeneration = false;
                 }
 
-                await ValidateSubFolders(accessibleChildren.OfType<Folder>().ToList(), directoryService, innerProgress, cancellationToken).ConfigureAwait(false);
+                libraryScanProgress?.CompleteSkippedPaths(accessibleChildren.Select(child => child.Id));
+                await ValidateSubFolders(accessibleChildren.OfType<Folder>().ToList(), directoryService, innerProgress, cancellationToken, libraryScanProgress).ConfigureAwait(false);
             }
 
             if (refreshChildMetadata)
@@ -806,7 +809,7 @@ namespace MediaBrowser.Controller.Entities
                         validChildren = Children.ToList();
                     }
 
-                    await RefreshMetadataRecursive(accessibleChildren, refreshOptions, recursive, innerProgress, cancellationToken).ConfigureAwait(false);
+                    await RefreshMetadataRecursive(accessibleChildren, refreshOptions, recursive, innerProgress, cancellationToken, libraryScanProgress).ConfigureAwait(false);
                 }
             }
         }
@@ -828,10 +831,24 @@ namespace MediaBrowser.Controller.Entities
             await newPrimary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task RefreshMetadataRecursive(IList<BaseItem> children, MetadataRefreshOptions refreshOptions, bool recursive, IProgress<double> progress, CancellationToken cancellationToken)
+        private async Task RefreshMetadataRecursive(IList<BaseItem> children, MetadataRefreshOptions refreshOptions, bool recursive, IProgress<double> progress, CancellationToken cancellationToken, ILibraryScanProgress libraryScanProgress = null)
         {
             await RunTasks(
-                (baseItem, innerProgress) => RefreshChildMetadata(baseItem, refreshOptions, recursive && baseItem.IsFolder, innerProgress, cancellationToken),
+                async (baseItem, innerProgress) =>
+                {
+                    libraryScanProgress?.StartPath(baseItem.Id);
+                    try
+                    {
+                        var childProgress = libraryScanProgress is null
+                            ? innerProgress
+                            : new LibraryPathProgress(innerProgress, libraryScanProgress, baseItem.Id, metadataPhase: true);
+                        await RefreshChildMetadata(baseItem, refreshOptions, recursive && baseItem.IsFolder, childProgress, cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        libraryScanProgress?.CompletePath(baseItem.Id);
+                    }
+                },
                 children,
                 progress,
                 cancellationToken).ConfigureAwait(false);
@@ -882,11 +899,26 @@ namespace MediaBrowser.Controller.Entities
         /// <param name="directoryService">The directory service.</param>
         /// <param name="progress">The progress.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
+        /// <param name="libraryScanProgress">The optional observer for the root scan's planned paths.</param>
         /// <returns>Task.</returns>
-        private async Task ValidateSubFolders(IList<Folder> children, IDirectoryService directoryService, IProgress<double> progress, CancellationToken cancellationToken)
+        private async Task ValidateSubFolders(IList<Folder> children, IDirectoryService directoryService, IProgress<double> progress, CancellationToken cancellationToken, ILibraryScanProgress libraryScanProgress)
         {
             await RunTasks(
-                (folder, innerProgress) => folder.ValidateChildrenInternal(innerProgress, true, false, false, null, directoryService, cancellationToken),
+                async (folder, innerProgress) =>
+                {
+                    libraryScanProgress?.StartPath(folder.Id);
+                    try
+                    {
+                        var childProgress = libraryScanProgress is null
+                            ? innerProgress
+                            : new LibraryPathProgress(innerProgress, libraryScanProgress, folder.Id, metadataPhase: false);
+                        await folder.ValidateChildrenInternal(childProgress, true, false, false, null, directoryService, cancellationToken).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        libraryScanProgress?.ReportPath(folder.Id, ProgressHelpers.ScannedSubfolders);
+                    }
+                },
                 children,
                 progress,
                 cancellationToken).ConfigureAwait(false);
@@ -2079,6 +2111,34 @@ namespace MediaBrowser.Controller.Entities
                         dto.Played = true;
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Mirrors existing child progress into its phase of a planned physical path.
+        /// </summary>
+        private sealed class LibraryPathProgress : IProgress<double>
+        {
+            private readonly IProgress<double> _progress;
+            private readonly ILibraryScanProgress _libraryScanProgress;
+            private readonly Guid _pathId;
+            private readonly bool _metadataPhase;
+
+            public LibraryPathProgress(IProgress<double> progress, ILibraryScanProgress libraryScanProgress, Guid pathId, bool metadataPhase)
+            {
+                _progress = progress;
+                _libraryScanProgress = libraryScanProgress;
+                _pathId = pathId;
+                _metadataPhase = metadataPhase;
+            }
+
+            public void Report(double value)
+            {
+                _progress.Report(value);
+                var percent = _metadataPhase
+                    ? ProgressHelpers.GetProgress(ProgressHelpers.ScannedSubfolders, ProgressHelpers.RefreshedMetadata, value)
+                    : Math.Clamp(value, 0, ProgressHelpers.ScannedSubfolders);
+                _libraryScanProgress.ReportPath(_pathId, percent);
             }
         }
 

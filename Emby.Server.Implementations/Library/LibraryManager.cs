@@ -1495,8 +1495,26 @@ namespace Emby.Server.Implementations.Library
 
             var innerProgress = new Progress<double>(pct => progress.Report(pct * 0.96));
 
-            // Validate the entire media library
-            await RootFolder.ValidateChildren(innerProgress, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), recursive: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var libraries = GetUserRootFolder().Children.OfType<CollectionFolder>().ToDictionary(
+                folder => folder.Id,
+                folder => (IReadOnlyList<Guid>)folder.GetPhysicalFolders().Select(path => path.Id).Distinct().ToArray());
+            var refreshOperation = ProviderManager.BeginLibraryRefresh(libraries, aggregate: true);
+            try
+            {
+                var libraryProgress = new LibraryScanProgress(
+                    innerProgress,
+                    libraries.Values.SelectMany(paths => paths),
+                    path => ProviderManager.StartLibraryRefreshPath(refreshOperation, path),
+                    (path, percent) => ProviderManager.ReportLibraryRefreshPath(refreshOperation, path, percent),
+                    path => ProviderManager.CompleteLibraryRefreshPath(refreshOperation, path));
+
+                // Observe the existing scan and metadata workers without changing their scheduling.
+                await RootFolder.ValidateChildren(libraryProgress, new MetadataRefreshOptions(new DirectoryService(_fileSystem)), recursive: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                ProviderManager.EndLibraryRefresh(refreshOperation);
+            }
 
             progress.Report(96);
 
@@ -1662,9 +1680,21 @@ namespace Emby.Server.Implementations.Library
 
                 if (refreshQueue is not null)
                 {
-                    info.RefreshProgress = libraryFolder.GetRefreshProgress();
-
-                    info.RefreshStatus = info.RefreshProgress.HasValue ? "Active" : refreshQueue.Contains(libraryFolder.Id) ? "Queued" : "Idle";
+                    var refresh = ProviderManager.GetLibraryRefreshProgress(libraryFolder.Id);
+                    if (refresh is not null)
+                    {
+                        info.RefreshProgress = refresh.Status == "Idle" ? null : refresh.Progress;
+                        info.RefreshStatus = refresh.Status;
+                        info.RefreshMode = refresh.Mode;
+                        info.RefreshCurrentPath = refresh.CurrentPath;
+                        info.RefreshTotalPaths = refresh.TotalPaths;
+                        info.RefreshOperationId = refresh.OperationId.ToString("N", CultureInfo.InvariantCulture);
+                    }
+                    else
+                    {
+                        info.RefreshProgress = libraryFolder.GetRefreshProgress();
+                        info.RefreshStatus = info.RefreshProgress.HasValue ? "Active" : refreshQueue.Contains(libraryFolder.Id) ? "Queued" : "Idle";
+                    }
                 }
             }
 
