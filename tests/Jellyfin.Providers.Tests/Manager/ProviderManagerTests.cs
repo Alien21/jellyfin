@@ -16,9 +16,14 @@ using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
+using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
+using MediaBrowser.Model.Providers;
+using MediaBrowser.Model.Querying;
 using MediaBrowser.Providers.Manager;
+using MediaBrowser.Providers.Trickplay;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -146,6 +151,154 @@ namespace Jellyfin.Providers.Tests.Manager
             Assert.True(original.ReplaceAllImages);
             Assert.NotSame(original, received[0]);
             Assert.NotSame(received[0], received[1]);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task RefreshSingleItem_ImagesOnly_ChangesArtworkWithoutMetadataServiceOrMetadataSavers(bool saveLocally)
+        {
+            var item = new ImageOnlyTestMovie
+            {
+                SaveLocally = saveLocally, Id = Guid.NewGuid(), Name = "User title", Overview = "User plot", PreferredMetadataLanguage = "cs",
+                DateLastRefreshed = DateTime.UtcNow.AddDays(-5)
+            };
+            item.SetImage(new ItemImageInfo { Type = ImageType.Primary, Path = "https://example.org/old.jpg" }, 0);
+            var stamp = item.DateLastRefreshed;
+            var service = MockIMetadataService(true, true);
+            var library = new Mock<ILibraryManager>();
+            library.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
+            library.Setup(l => l.UpdateImagesAsync(item, true)).Returns(Task.CompletedTask);
+            var baseItemManager = new Mock<IBaseItemManager>();
+            baseItemManager.Setup(b => b.IsImageFetcherEnabled(It.IsAny<BaseItem>(), It.IsAny<TypeOptions>(), It.IsAny<string>())).Returns(true);
+            var imageProvider = new Mock<IRemoteImageProvider>();
+            imageProvider.Setup(p => p.Name).Returns("Images");
+            imageProvider.Setup(p => p.Supports(item)).Returns(true);
+            imageProvider.Setup(p => p.GetSupportedImages(item)).Returns([ImageType.Primary]);
+            imageProvider.Setup(p => p.GetImages(item, It.IsAny<CancellationToken>()))
+                .ReturnsAsync([new RemoteImageInfo { Type = ImageType.Primary, Language = "cs", Url = "https://example.org/czech.jpg" }]);
+            var localImages = new Mock<ILocalImageProvider>();
+            localImages.Setup(p => p.Name).Returns("Local");
+            localImages.Setup(p => p.Supports(item)).Returns(true);
+            if (saveLocally)
+            {
+                localImages.Setup(p => p.GetImages(item, It.IsAny<IDirectoryService>())).Throws(new InvalidOperationException("Replacement must skip local artwork import."));
+            }
+            else
+            {
+                localImages.Setup(p => p.GetImages(item, It.IsAny<IDirectoryService>())).Returns(Array.Empty<LocalImageInfo>());
+            }
+
+            using var manager = GetProviderManager(baseItemManager: baseItemManager.Object, libraryManager: library.Object);
+            AddParts(manager, imageProviders: [localImages.Object, imageProvider.Object], metadataServices: [service.Object]);
+
+            var changed = await manager.RefreshSingleItem(
+                item,
+                new MetadataRefreshOptions(Mock.Of<IDirectoryService>())
+                {
+                MetadataRefreshMode = MetadataRefreshMode.None,
+                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllImages = true
+                },
+                CancellationToken.None);
+
+            localImages.Verify(p => p.GetImages(item, It.IsAny<IDirectoryService>()), saveLocally ? Times.Never() : Times.Once());
+            Assert.True(changed.HasFlag(ItemUpdateType.ImageUpdate));
+            Assert.Equal("https://example.org/czech.jpg", item.GetImagePath(ImageType.Primary, 0));
+            Assert.Equal("User title", item.Name);
+            Assert.Equal("User plot", item.Overview);
+            Assert.Equal(stamp, item.DateLastRefreshed);
+            service.Verify(s => s.RefreshMetadata(It.IsAny<BaseItem>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<CancellationToken>()), Times.Never);
+            library.Verify(l => l.UpdateImagesAsync(item, true), Times.Once);
+            library.Verify(l => l.RunMetadataSavers(It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task RefreshSingleItem_TrickplayOnly_DoesNotFetchRegularArtworkOrMetadata()
+        {
+            var item = new Movie { Name = "Unchanged" };
+            var libraryOptions = new LibraryOptions { ExtractTrickplayImagesDuringLibraryScan = false };
+            var library = new Mock<ILibraryManager>();
+            library.Setup(l => l.GetLibraryOptions(item)).Returns(libraryOptions);
+            var configuration = new ServerConfiguration();
+            configuration.TrickplayOptions.ScanBehavior = TrickplayScanBehavior.Blocking;
+            var configManager = Mock.Of<IServerConfigurationManager>(c => c.Configuration == configuration);
+            var trickplayManager = new Mock<ITrickplayManager>();
+            trickplayManager.Setup(t => t.RefreshTrickplayDataAsync(item, true, libraryOptions, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+            var service = MockIMetadataService(true, true);
+            var imageProvider = new Mock<IRemoteImageProvider>(MockBehavior.Strict);
+            using var manager = GetProviderManager(serverConfiguration: configuration, libraryManager: library.Object);
+            AddParts(
+                manager,
+                imageProviders: [imageProvider.Object],
+                metadataServices: [service.Object],
+                metadataProviders: [new TrickplayProvider(configManager, trickplayManager.Object, library.Object)]);
+
+            await manager.RefreshSingleItem(
+                item,
+                new MetadataRefreshOptions(Mock.Of<IDirectoryService>())
+                {
+                MetadataRefreshMode = MetadataRefreshMode.None, ImageRefreshMode = MetadataRefreshMode.None, RegenerateTrickplay = true
+                },
+                CancellationToken.None);
+
+            Assert.Equal("Unchanged", item.Name);
+            trickplayManager.Verify(t => t.RefreshTrickplayDataAsync(item, true, libraryOptions, It.IsAny<CancellationToken>()), Times.Once);
+            service.Verify(s => s.RefreshMetadata(It.IsAny<BaseItem>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<CancellationToken>()), Times.Never);
+            imageProvider.VerifyNoOtherCalls();
+            library.Verify(l => l.UpdateImagesAsync(It.IsAny<BaseItem>(), It.IsAny<bool>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task RefreshFullItem_ImagesOnly_RefreshesCollectionMembersWithoutCollapsingThem()
+        {
+            var member = new ImageOnlyTestMovie
+            {
+                Id = Guid.NewGuid(),
+                Name = "Collection member",
+                PreferredMetadataLanguage = "cs"
+            };
+            member.SetImage(new ItemImageInfo { Type = ImageType.Primary, Path = "https://example.org/english.jpg" }, 0);
+            var collection = new BoxSet { Id = Guid.NewGuid(), Name = "Parent collection" };
+            var folder = new CollectionTraversalTestFolder(member, collection)
+            {
+                Id = Guid.NewGuid(),
+                Name = "Library"
+            };
+            var library = new Mock<ILibraryManager>();
+            library.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
+            library.Setup(l => l.UpdateImagesAsync(member, true)).Returns(Task.CompletedTask);
+            var baseItemManager = new Mock<IBaseItemManager>();
+            baseItemManager.Setup(b => b.IsImageFetcherEnabled(It.IsAny<BaseItem>(), It.IsAny<TypeOptions>(), It.IsAny<string>())).Returns(true);
+            var images = new Mock<IRemoteImageProvider>();
+            images.Setup(p => p.Name).Returns("Images");
+            images.Setup(p => p.Supports(It.IsAny<BaseItem>())).Returns<BaseItem>(item => ReferenceEquals(item, member));
+            images.Setup(p => p.GetSupportedImages(member)).Returns([ImageType.Primary]);
+            images.Setup(p => p.GetImages(member, It.IsAny<CancellationToken>()))
+                .ReturnsAsync([new RemoteImageInfo { Type = ImageType.Primary, Language = "cs", Url = "https://example.org/czech.jpg" }]);
+            using var manager = GetProviderManager(
+                serverConfiguration: new ServerConfiguration { EnableGroupingMoviesIntoCollections = true },
+                baseItemManager: baseItemManager.Object,
+                libraryManager: library.Object);
+            AddParts(manager, imageProviders: [images.Object]);
+
+            await manager.RefreshFullItem(
+                folder,
+                new MetadataRefreshOptions(Mock.Of<IDirectoryService>())
+                {
+                    MetadataRefreshMode = MetadataRefreshMode.None,
+                    ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                    ReplaceAllImages = true
+                },
+                CancellationToken.None);
+
+            Assert.False(folder.CollapseRequested);
+            Assert.Equal("https://example.org/czech.jpg", member.GetImagePath(ImageType.Primary, 0));
+            images.Verify(p => p.GetImages(member, It.IsAny<CancellationToken>()), Times.Once);
+            images.Verify(p => p.GetImages(collection, It.IsAny<CancellationToken>()), Times.Never);
+            library.Verify(l => l.UpdateImagesAsync(member, true), Times.Once);
+            library.Verify(l => l.RunMetadataSavers(It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>()), Times.Never);
+            Assert.Null(manager.GetRefreshProgress(folder.Id));
         }
 
         public static TheoryData<int, int[]?, int[]?, int?[]?, int[]> GetImageProvidersOrderData()
@@ -765,6 +918,39 @@ namespace Jellyfin.Providers.Tests.Manager
             {
                 return GetItemLookupInfo<MetadataTestItemInfo>();
             }
+        }
+
+        private sealed class CollectionTraversalTestFolder : Folder
+        {
+            private readonly BaseItem _member;
+            private readonly BaseItem _collection;
+
+            public CollectionTraversalTestFolder(BaseItem member, BaseItem collection)
+            {
+                _member = member;
+                _collection = collection;
+            }
+
+            public bool? CollapseRequested { get; private set; }
+
+            public override bool IsSaveLocalMetadataEnabled() => false;
+
+            protected override QueryResult<BaseItem> GetItemsInternal(InternalItemsQuery query)
+            {
+                CollapseRequested = query.CollapseBoxSetItems;
+
+                // Folder queries collapse collection members by default. The refresh must opt out
+                // to receive the actual movie records rather than their parent collection.
+                return new QueryResult<BaseItem>(
+                    query.CollapseBoxSetItems == false ? new[] { _member } : new[] { _collection });
+            }
+        }
+
+        private sealed class ImageOnlyTestMovie : Movie
+        {
+            public bool SaveLocally { get; set; }
+
+            public override bool IsSaveLocalMetadataEnabled() => SaveLocally;
         }
 
         internal class MetadataTestItemInfo : ItemLookupInfo

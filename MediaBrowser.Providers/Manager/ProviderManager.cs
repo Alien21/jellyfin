@@ -35,6 +35,7 @@ using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Net;
 using MediaBrowser.Model.Providers;
 using MediaBrowser.Model.Querying;
+using MediaBrowser.Providers.Trickplay;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Book = MediaBrowser.Controller.Entities.Book;
@@ -172,6 +173,11 @@ namespace MediaBrowser.Providers.Manager
         /// <inheritdoc/>
         public Task<ItemUpdateType> RefreshSingleItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
         {
+            if (IsImageOnlyRefresh(options))
+            {
+                return RefreshImagesOnly(item, new MetadataRefreshOptions(options), cancellationToken);
+            }
+
             var type = item.GetType();
 
             var service = _metadataServices.FirstOrDefault(current => current.CanRefreshPrimary(type))
@@ -186,6 +192,48 @@ namespace MediaBrowser.Providers.Manager
             // Local artwork exclusions belong to this item, while the original options are also used
             // to refresh its children and siblings.
             return service.RefreshMetadata(item, new MetadataRefreshOptions(options), cancellationToken);
+        }
+
+        private static bool IsImageOnlyRefresh(MetadataRefreshOptions options)
+            => options.MetadataRefreshMode == MetadataRefreshMode.None
+                && (options.ImageRefreshMode > MetadataRefreshMode.ValidationOnly || options.RegenerateTrickplay);
+
+        private async Task<ItemUpdateType> RefreshImagesOnly(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
+        {
+            var updateType = ItemUpdateType.None;
+            if (options.ImageRefreshMode > MetadataRefreshMode.ValidationOnly)
+            {
+                var imageProvider = new ItemImageProvider(_logger, this, _fileSystem);
+                var providers = GetImageProviders(item, options).ToList();
+                if (item.IsSaveLocalMetadataEnabled() && options.ReplaceAllImages ? item.ValidateImages() : imageProvider.ValidateImages(item, providers, options))
+                {
+                    updateType |= ItemUpdateType.ImageUpdate;
+                }
+
+                var result = await imageProvider.RefreshImages(
+                    item,
+                    _libraryManager.GetLibraryOptions(item),
+                    providers.Where(provider => provider is not ILocalImageProvider),
+                    options,
+                    cancellationToken).ConfigureAwait(false);
+                updateType |= result.UpdateType;
+
+                if (updateType.HasFlag(ItemUpdateType.ImageUpdate))
+                {
+                    // Save only image rows. The regular item save runs metadata hooks and NFO savers.
+                    await _libraryManager.UpdateImagesAsync(item, true).ConfigureAwait(false);
+                }
+            }
+
+            if (options.RegenerateTrickplay && item is Video video)
+            {
+                foreach (var provider in _metadataProviders.OfType<TrickplayProvider>())
+                {
+                    await provider.FetchAsync(video, options, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            return updateType;
         }
 
         /// <inheritdoc/>
@@ -1207,7 +1255,7 @@ namespace MediaBrowser.Providers.Manager
                         continue;
                     }
 
-                    var task = item is MusicArtist artist
+                    var task = item is MusicArtist artist && !IsImageOnlyRefresh(refreshItem.RefreshOptions)
                         ? RefreshArtist(artist, refreshItem.RefreshOptions, cancellationToken)
                         : RefreshItem(item, refreshItem.RefreshOptions, cancellationToken);
 
@@ -1234,6 +1282,44 @@ namespace MediaBrowser.Providers.Manager
 
         private async Task RefreshItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
         {
+            if (IsImageOnlyRefresh(options))
+            {
+                OnRefreshStart(item);
+                try
+                {
+                    // Work with existing records: an artwork refresh must not reconcile files,
+                    // discover extras, or run metadata-container hooks.
+                    if (item is Folder imageFolder)
+                    {
+                        await RefreshImageItemSafely(item, options, cancellationToken).ConfigureAwait(false);
+                        var children = imageFolder.GetItemList(new InternalItemsQuery
+                        {
+                            Recursive = true,
+                            CollapseBoxSetItems = false,
+                            GroupByPresentationUniqueKey = false,
+                            IncludeAlternateVersions = true,
+                            DtoOptions = new DtoOptions(true)
+                        });
+                        for (var i = 0; i < children.Count; i++)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await RefreshImageItemSafely(children[i], options, cancellationToken).ConfigureAwait(false);
+                            OnRefreshProgress(item, 100.0 * (i + 1) / children.Count);
+                        }
+                    }
+                    else
+                    {
+                        await RefreshSingleItem(item, options, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    OnRefreshComplete(item);
+                }
+
+                return;
+            }
+
             await item.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
 
             // Collection folders don't validate their children so we'll have to simulate that here
@@ -1245,6 +1331,22 @@ namespace MediaBrowser.Providers.Manager
                 case Folder folder:
                     await folder.ValidateChildren(new Progress<double>(), options, cancellationToken: cancellationToken).ConfigureAwait(false);
                     break;
+            }
+        }
+
+        private async Task RefreshImageItemSafely(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await RefreshSingleItem(item, options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error refreshing images for item {ItemId}", item.Id);
             }
         }
 

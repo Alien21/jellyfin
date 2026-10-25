@@ -99,9 +99,10 @@ public class TrickplayProvider : ICustomMetadataProvider<Episode>,
     {
         var libraryOptions = _libraryManager.GetLibraryOptions(video);
         bool? enableDuringScan = libraryOptions?.ExtractTrickplayImagesDuringLibraryScan;
-        bool replace = options.RegenerateTrickplay && options.MetadataRefreshMode > MetadataRefreshMode.Default;
+        bool replace = options.RegenerateTrickplay
+            && (options.MetadataRefreshMode > MetadataRefreshMode.Default || options.MetadataRefreshMode == MetadataRefreshMode.None);
 
-        if (libraryOptions is null || !enableDuringScan.GetValueOrDefault(false))
+        if (libraryOptions is null || (!options.RegenerateTrickplay && !enableDuringScan.GetValueOrDefault(false)))
         {
             return ItemUpdateType.None;
         }

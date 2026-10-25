@@ -2567,7 +2567,7 @@ namespace Emby.Server.Implementations.Library
                                parentItem.SourceType != SourceType.Library; // not a channel
 
             // Skip image processing if current or live tv show
-            if (outdated.Length == 0 || isLiveTvShow)
+            if ((outdated.Length == 0 && !forceUpdate) || isLiveTvShow)
             {
                 RegisterItem(item);
                 return;
