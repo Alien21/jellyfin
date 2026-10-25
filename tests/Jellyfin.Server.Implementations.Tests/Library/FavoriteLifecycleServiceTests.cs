@@ -243,6 +243,30 @@ public sealed class FavoriteLifecycleServiceTests : IDisposable
         Assert.All(series, copy => Assert.False(Data(copy).IsFavorite));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Collection_AutoRemovalUsesTheExistingFavoritesSetting(bool autoRemove)
+    {
+        _settings.EnableAutoRemoveFavoritesAfterWatching = autoRemove;
+        var first = Movies(1)[0];
+        var second = Movies(1)[0];
+        var collection = Add(new BoxSet());
+        _collections[collection.Id] = new BaseItem[] { first, second };
+        var service = Service();
+        service.SetFavorite(_user, collection, true);
+
+        service.RecordPlaybackCompletion(_user, first, "first-film");
+        Assert.True(Data(collection).IsFavorite);
+        service.RecordMarkedPlayed(_user, second);
+
+        Assert.Equal(!autoRemove, Data(collection).IsFavorite);
+        if (!autoRemove)
+        {
+            _matcher.Verify(value => value.GetCollectionItems(It.IsAny<User>(), It.IsAny<BoxSet>()), Times.Never);
+        }
+    }
+
     [Fact]
     public void Collection_NewFullCycleCountsAnyMovieCopyAndSurvivesRestart()
     {
