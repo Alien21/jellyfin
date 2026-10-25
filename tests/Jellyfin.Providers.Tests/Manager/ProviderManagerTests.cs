@@ -35,6 +35,7 @@ using Xunit;
 
 namespace Jellyfin.Providers.Tests.Manager
 {
+    [Collection(nameof(ProviderManagerTests))]
     public class ProviderManagerTests
     {
         private static readonly ILogger<ProviderManager> _logger = new NullLogger<ProviderManager>();
@@ -299,6 +300,83 @@ namespace Jellyfin.Providers.Tests.Manager
             library.Verify(l => l.UpdateImagesAsync(member, true), Times.Once);
             library.Verify(l => l.RunMetadataSavers(It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>()), Times.Never);
             Assert.Null(manager.GetRefreshProgress(folder.Id));
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task RefreshFullItem_ImagesOnly_LibraryReportsPhysicalFolderProgressAndClearsIt(bool cancelAfterFirstChild)
+        {
+            var folder = new RefreshProgressTestFolder(new Movie { Id = Guid.NewGuid() }, new Movie { Id = Guid.NewGuid() })
+            {
+                Id = Guid.NewGuid()
+            };
+            var collection = new CollectionFolder { Id = Guid.NewGuid(), PhysicalFolderIds = [folder.Id] };
+            var library = new Mock<ILibraryManager>();
+            library.Setup(l => l.GetItemById(folder.Id)).Returns(folder);
+            library.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
+            var service = MockIMetadataService(true, true);
+            var directory = new Mock<IDirectoryService>(MockBehavior.Strict);
+            using var manager = GetProviderManager(libraryManager: library.Object);
+            AddParts(manager, metadataServices: [service.Object]);
+            using var cancellation = new CancellationTokenSource();
+            var started = new List<Guid>();
+            var completed = new List<Guid>();
+            var progress = new List<(Guid Id, double Value, double? LibraryValue)>();
+            manager.RefreshStarted += (_, e) => started.Add(e.Argument.Id);
+            manager.RefreshCompleted += (_, e) => completed.Add(e.Argument.Id);
+            manager.RefreshProgress += (_, e) =>
+            {
+                progress.Add((e.Argument.Item1.Id, e.Argument.Item2, collection.GetRefreshProgress()));
+                if (cancelAfterFirstChild)
+                {
+                    cancellation.Cancel();
+                }
+            };
+
+            var previousLibraryManager = BaseItem.LibraryManager;
+            var previousProviderManager = BaseItem.ProviderManager;
+            BaseItem.LibraryManager = library.Object;
+            BaseItem.ProviderManager = manager;
+            try
+            {
+                var options = new MetadataRefreshOptions(directory.Object)
+                {
+                    MetadataRefreshMode = MetadataRefreshMode.None,
+                    ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                    ReplaceAllImages = true
+                };
+                if (cancelAfterFirstChild)
+                {
+                    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => manager.RefreshFullItem(collection, options, cancellation.Token));
+                }
+                else
+                {
+                    await manager.RefreshFullItem(collection, options, cancellation.Token);
+                }
+
+                Assert.Equal(new[] { folder.Id }, started);
+                Assert.Equal(new[] { folder.Id }, completed);
+                Assert.Equal(cancelAfterFirstChild ? new[] { 50.0 } : new[] { 50.0, 100.0 }, progress.Select(p => p.Value));
+                Assert.All(progress, p =>
+                {
+                    Assert.Equal(folder.Id, p.Id);
+                    Assert.Equal(p.Value, p.LibraryValue);
+                });
+                Assert.Null(manager.GetRefreshProgress(folder.Id));
+                Assert.Null(manager.GetRefreshProgress(collection.Id));
+                Assert.Null(collection.GetRefreshProgress());
+                Assert.NotNull(folder.LastQuery);
+                Assert.False(folder.LastQuery.CollapseBoxSetItems);
+                service.Verify(s => s.RefreshMetadata(It.IsAny<BaseItem>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<CancellationToken>()), Times.Never);
+                library.Verify(l => l.RunMetadataSavers(It.IsAny<BaseItem>(), It.IsAny<ItemUpdateType>()), Times.Never);
+                directory.VerifyNoOtherCalls();
+            }
+            finally
+            {
+                BaseItem.LibraryManager = previousLibraryManager;
+                BaseItem.ProviderManager = previousProviderManager;
+            }
         }
 
         public static TheoryData<int, int[]?, int[]?, int?[]?, int[]> GetImageProvidersOrderData()
@@ -917,6 +995,19 @@ namespace Jellyfin.Providers.Tests.Manager
             public MetadataTestItemInfo GetLookupInfo()
             {
                 return GetItemLookupInfo<MetadataTestItemInfo>();
+            }
+        }
+
+        private sealed class RefreshProgressTestFolder(params BaseItem[] children) : Folder
+        {
+            public InternalItemsQuery? LastQuery { get; private set; }
+
+            public override bool IsSaveLocalMetadataEnabled() => false;
+
+            protected override QueryResult<BaseItem> GetItemsInternal(InternalItemsQuery query)
+            {
+                LastQuery = query;
+                return new QueryResult<BaseItem>(children);
             }
         }
 

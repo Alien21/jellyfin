@@ -1282,6 +1282,23 @@ namespace MediaBrowser.Providers.Manager
 
         private async Task RefreshItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
         {
+            // Route every library refresh through its physical folders, which own the
+            // progress reported by the library card and the refresh notifier.
+            if (item is CollectionFolder collectionFolder)
+            {
+                if (IsImageOnlyRefresh(options))
+                {
+                    await RefreshImageItemSafely(item, options, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await item.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
+                }
+
+                await RefreshCollectionFolderChildren(options, collectionFolder, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (IsImageOnlyRefresh(options))
             {
                 OnRefreshStart(item);
@@ -1322,15 +1339,9 @@ namespace MediaBrowser.Providers.Manager
 
             await item.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
 
-            // Collection folders don't validate their children so we'll have to simulate that here
-            switch (item)
+            if (item is Folder folder)
             {
-                case CollectionFolder collectionFolder:
-                    await RefreshCollectionFolderChildren(options, collectionFolder, cancellationToken).ConfigureAwait(false);
-                    break;
-                case Folder folder:
-                    await folder.ValidateChildren(new Progress<double>(), options, cancellationToken: cancellationToken).ConfigureAwait(false);
-                    break;
+                await folder.ValidateChildren(new Progress<double>(), options, cancellationToken: cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -1354,9 +1365,7 @@ namespace MediaBrowser.Providers.Manager
         {
             foreach (var child in collectionFolder.GetPhysicalFolders())
             {
-                await child.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
-
-                await child.ValidateChildren(new Progress<double>(), options, cancellationToken: cancellationToken).ConfigureAwait(false);
+                await RefreshItem(child, options, cancellationToken).ConfigureAwait(false);
             }
         }
 
