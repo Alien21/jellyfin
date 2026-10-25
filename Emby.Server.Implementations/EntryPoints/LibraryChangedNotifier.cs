@@ -5,8 +5,10 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data;
 using Jellyfin.Data.Events;
 using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Configuration;
@@ -45,7 +47,7 @@ public sealed class LibraryChangedNotifier : IHostedService, IDisposable
     private readonly Dictionary<Guid, BaseItem> _itemsAdded = [];
     private readonly Dictionary<Guid, BaseItem> _itemsRemoved = [];
     private readonly Dictionary<Guid, BaseItem> _itemsUpdated = [];
-    private readonly ConcurrentDictionary<Guid, DateTime> _lastProgressMessageTimes = new();
+    private readonly ConcurrentDictionary<Guid, ProgressDispatchState> _progressDispatches = new();
 
     private Timer? _libraryUpdateTimer;
 
@@ -84,6 +86,7 @@ public sealed class LibraryChangedNotifier : IHostedService, IDisposable
         _providerManager.RefreshCompleted += OnProviderRefreshCompleted;
         _providerManager.RefreshStarted += OnProviderRefreshStarted;
         _providerManager.RefreshProgress += OnProviderRefreshProgress;
+        _sessionManager.SessionControllerConnected += OnSessionControllerConnected;
 
         return Task.CompletedTask;
     }
@@ -98,6 +101,7 @@ public sealed class LibraryChangedNotifier : IHostedService, IDisposable
         _providerManager.RefreshCompleted -= OnProviderRefreshCompleted;
         _providerManager.RefreshStarted -= OnProviderRefreshStarted;
         _providerManager.RefreshProgress -= OnProviderRefreshProgress;
+        _sessionManager.SessionControllerConnected -= OnSessionControllerConnected;
 
         return Task.CompletedTask;
     }
@@ -111,47 +115,149 @@ public sealed class LibraryChangedNotifier : IHostedService, IDisposable
             return;
         }
 
+        // Logical library notifications and reconnect snapshots share the same ordered sender.
+        if (item is CollectionFolder)
+        {
+            _ = QueueLibraryRefreshProgressAsync(item.Id);
+            return;
+        }
+
         var progress = e.Argument.Item2;
-
-        if (_lastProgressMessageTimes.TryGetValue(item.Id, out var lastMessageSendTime))
+        var dispatch = _progressDispatches.GetOrAdd(item.Id, static _ => new ProgressDispatchState());
+        if (dispatch.ShouldThrottle(null, progress))
         {
-            if (progress > 0 && progress < 100 && (DateTime.UtcNow - lastMessageSendTime).TotalMilliseconds < 1000)
-            {
-                return;
-            }
+            return;
         }
 
-        _lastProgressMessageTimes.AddOrUpdate(item.Id, _ => DateTime.UtcNow, (_, _) => DateTime.UtcNow);
-
-        var dict = new Dictionary<string, string>();
-        dict["ItemId"] = item.Id.ToString("N", CultureInfo.InvariantCulture);
-        dict["Progress"] = progress.ToString(CultureInfo.InvariantCulture);
-
-        try
-        {
-            _sessionManager.SendMessageToAdminSessions(SessionMessageType.RefreshProgress, dict, CancellationToken.None);
-        }
-        catch
-        {
-        }
-
+        _ = SendRefreshProgressAsync(CreateRefreshProgressData(item.Id, null, progress));
         var collectionFolders = _libraryManager.GetCollectionFolders(item);
 
         foreach (var collectionFolder in collectionFolders)
         {
-            var collectionFolderDict = new Dictionary<string, string>
+            // Tracked operations publish their own logical library events. The legacy physical
+            // aggregate would otherwise overwrite their denominator, mode and completed paths.
+            if (_providerManager.GetLibraryRefreshProgress(collectionFolder.Id) is not null)
             {
-                ["ItemId"] = collectionFolder.Id.ToString("N", CultureInfo.InvariantCulture),
-                ["Progress"] = (collectionFolder.GetRefreshProgress() ?? 0).ToString(CultureInfo.InvariantCulture)
-            };
+                continue;
+            }
 
-            try
+            _ = QueueLibraryRefreshProgressAsync(collectionFolder.Id, legacyLibrary: collectionFolder);
+        }
+    }
+
+    private Task QueueLibraryRefreshProgressAsync(Guid libraryId, List<Guid>? userIds = null, Folder? legacyLibrary = null)
+    {
+        var dispatch = _progressDispatches.GetOrAdd(libraryId, static _ => new ProgressDispatchState());
+        var snapshot = userIds is null ? _providerManager.GetLibraryRefreshProgress(libraryId) : null;
+        if (legacyLibrary is not null && snapshot is not null)
+        {
+            return Task.CompletedTask;
+        }
+
+        var progress = snapshot?.Progress ?? legacyLibrary?.GetRefreshProgress() ?? 100;
+        return dispatch.Enqueue(
+            previous => SendLibraryRefreshProgressAfterAsync(previous, libraryId, userIds, legacyLibrary),
+            snapshot,
+            progress,
+            force: userIds is not null);
+    }
+
+    private async Task SendLibraryRefreshProgressAfterAsync(Task previous, Guid libraryId, List<Guid>? userIds, Folder? legacyLibrary)
+    {
+        try
+        {
+            await previous.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "A previous library refresh progress send failed");
+        }
+
+        try
+        {
+            // Read after the preceding send, so a delayed replay cannot overwrite a newer live
+            // snapshot. Legacy physical aggregates also yield to any newly tracked operation.
+            var snapshot = _providerManager.GetLibraryRefreshProgress(libraryId);
+            if (legacyLibrary is not null && snapshot is not null)
             {
-                _sessionManager.SendMessageToAdminSessions(SessionMessageType.RefreshProgress, collectionFolderDict, CancellationToken.None);
+                return;
             }
-            catch
+
+            await SendRefreshProgressAsync(CreateRefreshProgressData(libraryId, snapshot, legacyLibrary?.GetRefreshProgress()), userIds).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not prepare refresh progress for library {LibraryId}", libraryId);
+        }
+    }
+
+    private static Dictionary<string, string> CreateRefreshProgressData(Guid libraryId, LibraryRefreshProgress? snapshot, double? legacyProgress = null)
+        => new()
+        {
+            ["ItemId"] = libraryId.ToString("N", CultureInfo.InvariantCulture),
+            ["Progress"] = (snapshot?.Progress ?? legacyProgress ?? 100).ToString(CultureInfo.InvariantCulture),
+            ["Status"] = snapshot?.Status ?? (legacyProgress is < 100 ? "Active" : "Idle"),
+            ["Mode"] = snapshot?.Mode ?? string.Empty,
+            ["CurrentPath"] = (snapshot?.CurrentPath ?? 0).ToString(CultureInfo.InvariantCulture),
+            ["TotalPaths"] = (snapshot?.TotalPaths ?? 0).ToString(CultureInfo.InvariantCulture),
+            ["OperationId"] = (snapshot?.OperationId ?? Guid.Empty).ToString("N", CultureInfo.InvariantCulture)
+        };
+
+    private static bool SameRefreshContext(LibraryRefreshProgress? first, LibraryRefreshProgress? second)
+        => first is null
+            ? second is null
+            : second is not null
+                && first.OperationId.Equals(second.OperationId)
+                && string.Equals(first.Mode, second.Mode, StringComparison.Ordinal)
+                && string.Equals(first.Status, second.Status, StringComparison.Ordinal)
+                && first.CurrentPath == second.CurrentPath
+                && first.TotalPaths == second.TotalPaths;
+
+    private async Task SendRefreshProgressAsync(Dictionary<string, string> data, List<Guid>? userIds = null)
+    {
+        try
+        {
+            if (userIds is null)
             {
+                await _sessionManager.SendMessageToAdminSessions(SessionMessageType.RefreshProgress, data, CancellationToken.None).ConfigureAwait(false);
             }
+            else
+            {
+                await _sessionManager.SendMessageToUserSessions(userIds, SessionMessageType.RefreshProgress, data, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not send library refresh progress");
+        }
+    }
+
+    private void OnSessionControllerConnected(object? sender, SessionEventArgs e)
+        => _ = ReplayLibraryRefreshProgressAsync(e.SessionInfo);
+
+    private async Task ReplayLibraryRefreshProgressAsync(SessionInfo session)
+    {
+        try
+        {
+            if (session.UserId.IsEmpty())
+            {
+                return;
+            }
+
+            var user = _userManager.GetUserById(session.UserId);
+            if (user is null || !user.HasPermission(PermissionKind.IsAdministrator))
+            {
+                return;
+            }
+
+            foreach (var library in _libraryManager.GetUserRootFolder().Children.OfType<CollectionFolder>())
+            {
+                await QueueLibraryRefreshProgressAsync(library.Id, [user.Id]).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not replay library refresh progress for {UserId}", session.UserId);
         }
     }
 
@@ -162,11 +268,14 @@ public sealed class LibraryChangedNotifier : IHostedService, IDisposable
     {
         OnProviderRefreshProgress(sender, new GenericEventArgs<Tuple<BaseItem, double>>(new Tuple<BaseItem, double>(e.Argument, 100)));
 
-        _lastProgressMessageTimes.TryRemove(e.Argument.Id, out _);
+        if (e.Argument is not CollectionFolder)
+        {
+            _progressDispatches.TryRemove(e.Argument.Id, out _);
+        }
     }
 
     private static bool EnableRefreshMessage(BaseItem item)
-        => item is Folder { IsRoot: false, IsTopParent: true }
+        => item is CollectionFolder || item is Folder { IsRoot: false, IsTopParent: true }
             and not (AggregateFolder or UserRootFolder or UserView or Channel);
 
     private void OnLibraryItemAdded(object? sender, ItemChangeEventArgs e)
@@ -411,5 +520,58 @@ public sealed class LibraryChangedNotifier : IHostedService, IDisposable
     {
         _libraryUpdateTimer?.Dispose();
         _libraryUpdateTimer = null;
+    }
+
+    private sealed class ProgressDispatchState
+    {
+        private readonly Lock _syncLock = new();
+        private Task _tail = Task.CompletedTask;
+        private DateTime _lastQueuedAt;
+        private LibraryRefreshProgress? _lastSnapshot;
+
+        public bool ShouldThrottle(LibraryRefreshProgress? snapshot, double progress)
+        {
+            lock (_syncLock)
+            {
+                return ThrottleProgress(snapshot, progress);
+            }
+        }
+
+        public Task Enqueue(Func<Task, Task> send, LibraryRefreshProgress? snapshot, double progress, bool force)
+        {
+            lock (_syncLock)
+            {
+                if (!force && ThrottleProgress(snapshot, progress))
+                {
+                    return Task.CompletedTask;
+                }
+
+                var previous = _tail;
+                // Scheduling after Tail is replaced also keeps reentrant callbacks behind this send.
+                _tail = previous.ContinueWith(
+                    _ => send(previous),
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default).Unwrap();
+                return _tail;
+            }
+        }
+
+        private bool ThrottleProgress(LibraryRefreshProgress? snapshot, double progress)
+        {
+            var now = DateTime.UtcNow;
+            if (progress > 0 && progress < 100
+                && snapshot?.Status is not ("Queued" or "Idle")
+                && snapshot is not { CurrentPath: 0 }
+                && SameRefreshContext(_lastSnapshot, snapshot)
+                && (now - _lastQueuedAt).TotalMilliseconds < 1000)
+            {
+                return true;
+            }
+
+            _lastQueuedAt = now;
+            _lastSnapshot = snapshot;
+            return false;
+        }
     }
 }
