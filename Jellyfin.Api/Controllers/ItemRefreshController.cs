@@ -91,7 +91,15 @@ public class ItemRefreshController : BaseJellyfinApiController
             RegenerateTrickplay = regenerateTrickplay
         };
 
-        _providerManager.QueueRefresh(item.Id, refreshOptions, RefreshPriority.High);
+        if (item is CollectionFolder library)
+        {
+            _providerManager.QueueRefresh(library, refreshOptions, RefreshPriority.High);
+        }
+        else
+        {
+            _providerManager.QueueRefresh(item.Id, refreshOptions, RefreshPriority.High);
+        }
+
         return NoContent();
     }
 }

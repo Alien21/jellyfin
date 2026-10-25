@@ -243,6 +243,12 @@ namespace MediaBrowser.Controller.Entities
 
         public override double? GetRefreshProgress()
         {
+            var refresh = ProviderManager.GetLibraryRefreshProgress(Id);
+            if (refresh is not null)
+            {
+                return refresh.Status == "Idle" ? null : refresh.Progress;
+            }
+
             var folders = GetPhysicalFolders(true).ToList();
             double totalProgresses = 0;
             var foldersWithProgress = 0;

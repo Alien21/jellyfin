@@ -314,6 +314,7 @@ namespace Jellyfin.Providers.Tests.Manager
             var collection = new CollectionFolder { Id = Guid.NewGuid(), PhysicalFolderIds = [folder.Id] };
             var library = new Mock<ILibraryManager>();
             library.Setup(l => l.GetItemById(folder.Id)).Returns(folder);
+            library.Setup(l => l.GetItemById(collection.Id)).Returns(collection);
             library.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
             var service = MockIMetadataService(true, true);
             var directory = new Mock<IDirectoryService>(MockBehavior.Strict);
@@ -327,6 +328,11 @@ namespace Jellyfin.Providers.Tests.Manager
             manager.RefreshCompleted += (_, e) => completed.Add(e.Argument.Id);
             manager.RefreshProgress += (_, e) =>
             {
+                if (!e.Argument.Item1.Id.Equals(folder.Id))
+                {
+                    return;
+                }
+
                 progress.Add((e.Argument.Item1.Id, e.Argument.Item2, collection.GetRefreshProgress()));
                 if (cancelAfterFirstChild)
                 {
@@ -752,6 +758,162 @@ namespace Jellyfin.Providers.Tests.Manager
             Assert.Equal(ItemCount - 1, processed.Count);
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task QueueRefresh_LibrariesExposeFrozenQueuedPathsAndClearTheirOwnLifecycle(bool stopServer)
+        {
+            var firstMovie = new ImageOnlyTestMovie { Id = Guid.NewGuid(), Name = "First queued movie", PreferredMetadataLanguage = "cs" };
+            var firstPath = new RefreshProgressTestFolder(firstMovie) { Id = Guid.NewGuid() };
+            var secondFirstPath = new RefreshProgressTestFolder(new Movie { Id = Guid.NewGuid() }, new Movie { Id = Guid.NewGuid() }) { Id = Guid.NewGuid() };
+            var secondLastPath = new RefreshProgressTestFolder(new Movie { Id = Guid.NewGuid() }, new Movie { Id = Guid.NewGuid() }) { Id = Guid.NewGuid() };
+            var unplannedPath = new RefreshProgressTestFolder() { Id = Guid.NewGuid() };
+            var firstLibrary = new CollectionFolder { Id = Guid.NewGuid(), PhysicalFolderIds = [firstPath.Id] };
+            var secondLibrary = new CollectionFolder { Id = Guid.NewGuid(), PhysicalFolderIds = [secondFirstPath.Id, secondLastPath.Id] };
+            var items = new BaseItem[] { firstLibrary, secondLibrary, firstPath, secondFirstPath, secondLastPath, unplannedPath }.ToDictionary(item => item.Id);
+            var library = new Mock<ILibraryManager>();
+            library.Setup(value => value.GetItemById(It.IsAny<Guid>())).Returns((Guid id) => items.GetValueOrDefault(id));
+            library.Setup(value => value.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
+            library.Setup(value => value.GetCollectionFolders(It.IsAny<BaseItem>())).Returns(new List<Folder>());
+            var firstImageStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstImage = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstPathCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var queueDrained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cacheClearCalls = 0;
+            library.Setup(value => value.ClearIgnoreRuleCache()).Callback(() =>
+            {
+                if (Interlocked.Increment(ref cacheClearCalls) == 2)
+                {
+                    queueDrained.TrySetResult();
+                }
+            });
+            var baseItems = new Mock<IBaseItemManager>();
+            baseItems.Setup(value => value.IsImageFetcherEnabled(It.IsAny<BaseItem>(), It.IsAny<TypeOptions>(), It.IsAny<string>())).Returns(true);
+            var images = new Mock<IRemoteImageProvider>();
+            images.Setup(value => value.Name).Returns("Queue gate");
+            images.Setup(value => value.Supports(It.IsAny<BaseItem>())).Returns<BaseItem>(item => ReferenceEquals(item, firstMovie));
+            images.Setup(value => value.GetSupportedImages(firstMovie)).Returns([ImageType.Primary]);
+            images.Setup(value => value.GetImages(firstMovie, It.IsAny<CancellationToken>()))
+                .Returns(async (BaseItem _, CancellationToken cancellationToken) =>
+                {
+                    firstImageStarted.TrySetResult();
+                    await releaseFirstImage.Task.WaitAsync(cancellationToken);
+                    return Enumerable.Empty<RemoteImageInfo>();
+                });
+            using var manager = GetProviderManager(libraryManager: library.Object, baseItemManager: baseItems.Object);
+            AddParts(manager, imageProviders: [images.Object]);
+            var snapshots = new ConcurrentQueue<LibraryRefreshProgress>();
+            var startedPaths = new ConcurrentQueue<Guid>();
+            manager.RefreshStarted += (_, e) =>
+            {
+                if (e.Argument.Id.Equals(secondFirstPath.Id) || e.Argument.Id.Equals(secondLastPath.Id) || e.Argument.Id.Equals(unplannedPath.Id))
+                {
+                    startedPaths.Enqueue(e.Argument.Id);
+                }
+            };
+            manager.RefreshCompleted += (_, e) =>
+            {
+                if (e.Argument.Id.Equals(firstPath.Id))
+                {
+                    firstPathCompleted.TrySetResult();
+                }
+            };
+            manager.RefreshProgress += (_, e) =>
+            {
+                if (e.Argument.Item1.Id.Equals(secondLibrary.Id) && manager.GetLibraryRefreshProgress(secondLibrary.Id) is { } snapshot)
+                {
+                    snapshots.Enqueue(snapshot);
+                }
+            };
+            var previousLibrary = BaseItem.LibraryManager;
+            var previousProvider = BaseItem.ProviderManager;
+            BaseItem.LibraryManager = library.Object;
+            BaseItem.ProviderManager = manager;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            var options = new MetadataRefreshOptions(Mock.Of<IDirectoryService>())
+            {
+                MetadataRefreshMode = MetadataRefreshMode.None,
+                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllImages = true
+            };
+
+            try
+            {
+                manager.QueueRefresh(firstLibrary, options, RefreshPriority.Normal);
+                await firstImageStarted.Task.WaitAsync(timeout.Token);
+                manager.QueueRefresh(secondLibrary, options, RefreshPriority.Normal);
+
+                var queued = manager.GetLibraryRefreshProgress(secondLibrary.Id);
+                Assert.NotNull(queued);
+                Assert.Equal("Sequential", queued.Mode);
+                Assert.Equal("Queued", queued.Status);
+                Assert.Equal(0, queued.CurrentPath);
+                Assert.Equal(2, queued.TotalPaths);
+                Assert.Equal(0.0, queued.Progress);
+
+                // Changes after queueing cannot change the saved denominator or execution order.
+                secondLibrary.PhysicalFolderIds = [secondLastPath.Id, unplannedPath.Id];
+                if (stopServer)
+                {
+                    manager.Dispose();
+                    Assert.Null(manager.GetLibraryRefreshProgress(firstLibrary.Id));
+                    Assert.Null(manager.GetLibraryRefreshProgress(secondLibrary.Id));
+                    await firstPathCompleted.Task.WaitAsync(timeout.Token);
+                    Assert.Null(secondFirstPath.LastQuery);
+                    Assert.Null(secondLastPath.LastQuery);
+                }
+                else
+                {
+                    releaseFirstImage.TrySetResult();
+                    await queueDrained.Task.WaitAsync(timeout.Token);
+
+                    Assert.Equal([secondFirstPath.Id, secondLastPath.Id], startedPaths);
+                    Assert.NotNull(secondFirstPath.LastQuery);
+                    Assert.NotNull(secondLastPath.LastQuery);
+                    Assert.Contains(snapshots, snapshot => snapshot.CurrentPath == 1 && snapshot.Progress == 50 && snapshot.TotalPaths == 2 && snapshot.Status == "Active");
+                    Assert.Contains(snapshots, snapshot => snapshot.CurrentPath == 2 && snapshot.Progress == 50 && snapshot.TotalPaths == 2 && snapshot.Status == "Active");
+                    Assert.Null(manager.GetLibraryRefreshProgress(firstLibrary.Id));
+                    Assert.Null(manager.GetLibraryRefreshProgress(secondLibrary.Id));
+                    Assert.Empty(manager.GetRefreshQueue());
+                }
+
+                Assert.Null(unplannedPath.LastQuery);
+                Assert.Null(manager.GetRefreshProgress(firstPath.Id));
+            }
+            finally
+            {
+                releaseFirstImage.TrySetResult();
+                if (!stopServer)
+                {
+                    try
+                    {
+                        await queueDrained.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                    }
+                    catch (Exception exception) when (exception is TimeoutException or OperationCanceledException)
+                    {
+                        // Disposal below still cancels a worker if an earlier assertion failed.
+                    }
+                }
+
+                manager.Dispose();
+                if (firstImageStarted.Task.IsCompletedSuccessfully && !firstPathCompleted.Task.IsCompleted)
+                {
+                    try
+                    {
+                        await firstPathCompleted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+                    }
+                    catch (Exception exception) when (exception is TimeoutException or OperationCanceledException)
+                    {
+                        // Keep cleanup bounded when the regression itself prevents completion.
+                    }
+                }
+
+                BaseItem.LibraryManager = previousLibrary;
+                BaseItem.ProviderManager = previousProvider;
+            }
+        }
+
         private static void GetMetadataProviders_CanRefreshMetadata_Tester(
             string providerType,
             bool expected,
@@ -1002,6 +1164,8 @@ namespace Jellyfin.Providers.Tests.Manager
         {
             public InternalItemsQuery? LastQuery { get; private set; }
 
+            public override string GetClientTypeName() => nameof(Folder);
+
             public override bool IsSaveLocalMetadataEnabled() => false;
 
             protected override QueryResult<BaseItem> GetItemsInternal(InternalItemsQuery query)
@@ -1040,6 +1204,8 @@ namespace Jellyfin.Providers.Tests.Manager
         private sealed class ImageOnlyTestMovie : Movie
         {
             public bool SaveLocally { get; set; }
+
+            public override string GetClientTypeName() => nameof(Movie);
 
             public override bool IsSaveLocalMetadataEnabled() => SaveLocally;
         }

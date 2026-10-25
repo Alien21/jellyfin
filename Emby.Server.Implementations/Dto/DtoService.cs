@@ -9,6 +9,7 @@ using System.Linq;
 using Jellyfin.Data;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Common;
 using MediaBrowser.Controller.Channels;
@@ -488,7 +489,40 @@ namespace Emby.Server.Implementations.Dto
                 dto.HasLyrics = audio.GetMediaStreams().Any(s => s.Type == MediaStreamType.Lyric);
             }
 
+            if (user?.HasPermission(PermissionKind.IsAdministrator) == true)
+            {
+                AttachLibraryRefreshInfo(item, dto);
+            }
+
             return dto;
+        }
+
+        private void AttachLibraryRefreshInfo(BaseItem item, BaseItemDto dto)
+        {
+            var library = item as CollectionFolder;
+            if (library is null && item is UserView view && !view.DisplayParentId.IsEmpty())
+            {
+                library = _libraryManager.GetItemById(view.DisplayParentId) as CollectionFolder;
+            }
+
+            if (library is null)
+            {
+                return;
+            }
+
+            dto.RefreshItemId = library.Id.ToString("N", CultureInfo.InvariantCulture);
+            var refresh = _providerManager.GetLibraryRefreshProgress(library.Id);
+            if (refresh is null)
+            {
+                return;
+            }
+
+            dto.RefreshProgress = refresh.Status == "Idle" ? null : refresh.Progress;
+            dto.RefreshStatus = refresh.Status;
+            dto.RefreshMode = refresh.Mode;
+            dto.RefreshCurrentPath = refresh.CurrentPath;
+            dto.RefreshTotalPaths = refresh.TotalPaths;
+            dto.RefreshOperationId = refresh.OperationId.ToString("N", CultureInfo.InvariantCulture);
         }
 
         private static void NormalizeMediaSourceContainers(BaseItemDto dto)

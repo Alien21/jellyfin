@@ -76,6 +76,24 @@ public class ItemRefreshControllerTests
     }
 
     [Fact]
+    public void RefreshItem_LibraryQueuesTheResolvedLibraryPlan()
+    {
+        var library = new CollectionFolder { Id = Guid.NewGuid() };
+        var libraries = new Mock<ILibraryManager>();
+        libraries.Setup(manager => manager.GetItemById<BaseItem>(library.Id, It.IsAny<Guid>())).Returns(library);
+        var providers = new Mock<IProviderManager>();
+        var subject = new ItemRefreshController(libraries.Object, providers.Object, Mock.Of<IFileSystem>())
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
+
+        subject.RefreshItem(library.Id);
+
+        providers.Verify(manager => manager.QueueRefresh(library, It.IsAny<MetadataRefreshOptions>(), RefreshPriority.High), Times.Once);
+        providers.Verify(manager => manager.QueueRefresh(It.IsAny<Guid>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<RefreshPriority>()), Times.Never);
+    }
+
+    [Fact]
     public void RefreshOptions_Copy_PreservesNfoAndImageChoices()
     {
         var original = new MetadataRefreshOptions(Mock.Of<IDirectoryService>())

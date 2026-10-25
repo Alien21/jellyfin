@@ -54,5 +54,13 @@ namespace MediaBrowser.Model.Entities
         public double? RefreshProgress { get; set; }
 
         public string RefreshStatus { get; set; }
+
+        public string RefreshMode { get; set; }
+
+        public int? RefreshCurrentPath { get; set; }
+
+        public int? RefreshTotalPaths { get; set; }
+
+        public string RefreshOperationId { get; set; }
     }
 }

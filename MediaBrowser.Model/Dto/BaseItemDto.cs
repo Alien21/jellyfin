@@ -29,6 +29,41 @@ namespace MediaBrowser.Model.Dto
         public string OriginalTitle { get; set; }
 
         /// <summary>
+        /// Gets or sets the library identifier used by refresh notifications.
+        /// </summary>
+        public string RefreshItemId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the active library refresh percentage.
+        /// </summary>
+        public double? RefreshProgress { get; set; }
+
+        /// <summary>
+        /// Gets or sets the queued, active or idle library refresh state.
+        /// </summary>
+        public string RefreshStatus { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether progress represents sequential or aggregate paths.
+        /// </summary>
+        public string RefreshMode { get; set; }
+
+        /// <summary>
+        /// Gets or sets the current path position in the library refresh.
+        /// </summary>
+        public int? RefreshCurrentPath { get; set; }
+
+        /// <summary>
+        /// Gets or sets the stable number of planned library paths.
+        /// </summary>
+        public int? RefreshTotalPaths { get; set; }
+
+        /// <summary>
+        /// Gets or sets the identifier of the library refresh operation.
+        /// </summary>
+        public string RefreshOperationId { get; set; }
+
+        /// <summary>
         /// Gets or sets the server identifier.
         /// </summary>
         /// <value>The server identifier.</value>

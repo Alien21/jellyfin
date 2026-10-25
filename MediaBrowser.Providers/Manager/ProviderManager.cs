@@ -64,8 +64,9 @@ namespace MediaBrowser.Providers.Manager
         private readonly IServerConfigurationManager _configurationManager;
         private readonly IBaseItemManager _baseItemManager;
         private readonly ConcurrentDictionary<Guid, double> _activeRefreshes = new();
+        private readonly LibraryRefreshProgressTracker _libraryRefreshes = new();
         private readonly CancellationTokenSource _disposeCancellationTokenSource = new();
-        private readonly PriorityQueue<(Guid ItemId, MetadataRefreshOptions RefreshOptions), RefreshPriority> _refreshQueue = new();
+        private readonly PriorityQueue<(Guid ItemId, MetadataRefreshOptions RefreshOptions, Guid? OperationId), RefreshPriority> _refreshQueue = new();
         private readonly IMemoryCache _memoryCache;
         private readonly IMediaSegmentManager _mediaSegmentManager;
         private readonly ISimilarItemsManager _similarItemsManager;
@@ -137,6 +138,7 @@ namespace MediaBrowser.Providers.Manager
             _mediaSegmentManager = mediaSegmentManager;
             _similarItemsManager = similarItemsManager;
 
+            _libraryRefreshes.Changed += OnLibraryRefreshChanged;
             CollectionFolder.LibraryOptionsUpdated += OnLibraryOptionsUpdated;
             _configurationManager.ConfigurationUpdated += OnConfigurationUpdated;
         }
@@ -149,6 +151,45 @@ namespace MediaBrowser.Providers.Manager
 
         /// <inheritdoc/>
         public event EventHandler<GenericEventArgs<Tuple<BaseItem, double>>>? RefreshProgress;
+
+        /// <inheritdoc />
+        public Guid BeginLibraryRefresh(IReadOnlyDictionary<Guid, IReadOnlyList<Guid>> libraries, bool aggregate)
+            => _libraryRefreshes.Begin(libraries, aggregate);
+
+        /// <inheritdoc />
+        public void StartLibraryRefreshPath(Guid operationId, Guid pathId)
+            => _libraryRefreshes.StartPath(operationId, pathId);
+
+        /// <inheritdoc />
+        public void ReportLibraryRefreshPath(Guid operationId, Guid pathId, double progress)
+            => _libraryRefreshes.ReportPath(operationId, pathId, progress);
+
+        /// <inheritdoc />
+        public void CompleteLibraryRefreshPath(Guid operationId, Guid pathId)
+            => _libraryRefreshes.CompletePath(operationId, pathId);
+
+        /// <inheritdoc />
+        public void EndLibraryRefresh(Guid operationId)
+            => _libraryRefreshes.End(operationId);
+
+        /// <inheritdoc />
+        public LibraryRefreshProgress? GetLibraryRefreshProgress(Guid libraryId)
+            => _libraryRefreshes.Get(libraryId);
+
+        private void OnLibraryRefreshChanged(Guid libraryId)
+        {
+            try
+            {
+                if (_libraryManager.GetItemById(libraryId) is CollectionFolder library)
+                {
+                    PublishRefreshProgress(library, _libraryRefreshes.Get(libraryId)?.Progress ?? 100);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Could not notify refresh progress for library {LibraryId}", libraryId);
+            }
+        }
 
         /// <inheritdoc/>
         public void AddParts(
@@ -1171,6 +1212,11 @@ namespace MediaBrowser.Providers.Manager
                 return;
             }
 
+            PublishRefreshProgress(item, progress);
+        }
+
+        private void PublishRefreshProgress(BaseItem item, double progress)
+        {
             try
             {
                 RefreshProgress?.Invoke(this, new GenericEventArgs<Tuple<BaseItem, double>>(new Tuple<BaseItem, double>(item, progress)));
@@ -1184,6 +1230,33 @@ namespace MediaBrowser.Providers.Manager
 
         /// <inheritdoc/>
         public void QueueRefresh(Guid itemId, MetadataRefreshOptions options, RefreshPriority priority)
+            => EnqueueRefresh(itemId, options, priority, null);
+
+        /// <inheritdoc />
+        public void QueueRefresh(CollectionFolder library, MetadataRefreshOptions options, RefreshPriority priority)
+        {
+            ArgumentNullException.ThrowIfNull(library);
+            if (_disposed)
+            {
+                return;
+            }
+
+            var operationId = BeginSequentialLibraryRefresh(library);
+            try
+            {
+                if (!EnqueueRefresh(library.Id, options, priority, operationId))
+                {
+                    EndLibraryRefresh(operationId);
+                }
+            }
+            catch
+            {
+                EndLibraryRefresh(operationId);
+                throw;
+            }
+        }
+
+        private bool EnqueueRefresh(Guid itemId, MetadataRefreshOptions options, RefreshPriority priority, Guid? operationId)
         {
             if (itemId.IsEmpty())
             {
@@ -1192,24 +1265,30 @@ namespace MediaBrowser.Providers.Manager
 
             if (_disposed)
             {
-                return;
+                return false;
             }
 
             // PriorityQueue is not thread safe and the processor dequeues concurrently, so every
             // touch of the queue takes the lock.
             lock (_refreshQueueLock)
             {
-                _refreshQueue.Enqueue((itemId, options), priority);
+                if (_disposed)
+                {
+                    return false;
+                }
+
+                _refreshQueue.Enqueue((itemId, new MetadataRefreshOptions(options), operationId), priority);
 
                 if (_isProcessingRefreshQueue)
                 {
-                    return;
+                    return true;
                 }
 
                 _isProcessingRefreshQueue = true;
             }
 
             Task.Run(StartProcessingRefreshQueue);
+            return true;
         }
 
         private async Task StartProcessingRefreshQueue()
@@ -1232,7 +1311,7 @@ namespace MediaBrowser.Providers.Manager
 
             while (true)
             {
-                (Guid ItemId, MetadataRefreshOptions RefreshOptions) refreshItem;
+                (Guid ItemId, MetadataRefreshOptions RefreshOptions, Guid? OperationId) refreshItem;
 
                 // Dequeueing and standing down happen under one lock, otherwise a refresh queued
                 // just after the queue ran dry would see a processor that has already stopped.
@@ -1257,7 +1336,7 @@ namespace MediaBrowser.Providers.Manager
 
                     var task = item is MusicArtist artist && !IsImageOnlyRefresh(refreshItem.RefreshOptions)
                         ? RefreshArtist(artist, refreshItem.RefreshOptions, cancellationToken)
-                        : RefreshItem(item, refreshItem.RefreshOptions, cancellationToken);
+                        : RefreshItem(item, refreshItem.RefreshOptions, cancellationToken, refreshItem.OperationId);
 
                     await task.ConfigureAwait(false);
                 }
@@ -1272,6 +1351,13 @@ namespace MediaBrowser.Providers.Manager
                     // timeout, which must not stop the queue draining.
                     _logger.LogError(ex, "Error refreshing item");
                 }
+                finally
+                {
+                    if (refreshItem.OperationId is Guid operationId)
+                    {
+                        EndLibraryRefresh(operationId);
+                    }
+                }
             }
 
             if (!_disposed)
@@ -1280,22 +1366,41 @@ namespace MediaBrowser.Providers.Manager
             }
         }
 
-        private async Task RefreshItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken)
+        private async Task RefreshItem(BaseItem item, MetadataRefreshOptions options, CancellationToken cancellationToken, Guid? operationId = null)
         {
             // Route every library refresh through its physical folders, which own the
             // progress reported by the library card and the refresh notifier.
             if (item is CollectionFolder collectionFolder)
             {
-                if (IsImageOnlyRefresh(options))
+                var ownsLibraryOperation = operationId is null;
+                var libraryOperationId = operationId ?? BeginSequentialLibraryRefresh(collectionFolder);
+                try
                 {
-                    await RefreshImageItemSafely(item, options, cancellationToken).ConfigureAwait(false);
+                    var plannedPaths = _libraryRefreshes.GetPaths(libraryOperationId, collectionFolder.Id);
+                    if (plannedPaths.Count > 0)
+                    {
+                        StartLibraryRefreshPath(libraryOperationId, plannedPaths[0]);
+                    }
+
+                    if (IsImageOnlyRefresh(options))
+                    {
+                        await RefreshImageItemSafely(item, options, cancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await item.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    await RefreshCollectionFolderChildren(options, collectionFolder, cancellationToken, libraryOperationId).ConfigureAwait(false);
                 }
-                else
+                finally
                 {
-                    await item.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
+                    if (ownsLibraryOperation)
+                    {
+                        EndLibraryRefresh(libraryOperationId);
+                    }
                 }
 
-                await RefreshCollectionFolderChildren(options, collectionFolder, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -1321,7 +1426,13 @@ namespace MediaBrowser.Providers.Manager
                         {
                             cancellationToken.ThrowIfCancellationRequested();
                             await RefreshImageItemSafely(children[i], options, cancellationToken).ConfigureAwait(false);
-                            OnRefreshProgress(item, 100.0 * (i + 1) / children.Count);
+                            var percent = 100.0 * (i + 1) / children.Count;
+                            if (operationId is Guid libraryOperationId)
+                            {
+                                ReportLibraryRefreshPath(libraryOperationId, item.Id, percent);
+                            }
+
+                            OnRefreshProgress(item, percent);
                         }
                     }
                     else
@@ -1341,7 +1452,14 @@ namespace MediaBrowser.Providers.Manager
 
             if (item is Folder folder)
             {
-                await folder.ValidateChildren(new Progress<double>(), options, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var progress = new Progress<double>(percent =>
+                {
+                    if (operationId is Guid libraryOperationId)
+                    {
+                        ReportLibraryRefreshPath(libraryOperationId, item.Id, percent);
+                    }
+                });
+                await folder.ValidateChildren(progress, options, cancellationToken: cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -1361,11 +1479,24 @@ namespace MediaBrowser.Providers.Manager
             }
         }
 
-        private async Task RefreshCollectionFolderChildren(MetadataRefreshOptions options, CollectionFolder collectionFolder, CancellationToken cancellationToken)
+        private Guid BeginSequentialLibraryRefresh(CollectionFolder library)
         {
-            foreach (var child in collectionFolder.GetPhysicalFolders())
+            IReadOnlyList<Guid> paths = library.GetPhysicalFolders().Select(folder => folder.Id).Distinct().ToArray();
+            return BeginLibraryRefresh(new Dictionary<Guid, IReadOnlyList<Guid>> { [library.Id] = paths }, aggregate: false);
+        }
+
+        private async Task RefreshCollectionFolderChildren(MetadataRefreshOptions options, CollectionFolder collectionFolder, CancellationToken cancellationToken, Guid operationId)
+        {
+            foreach (var pathId in _libraryRefreshes.GetPaths(operationId, collectionFolder.Id))
             {
-                await RefreshItem(child, options, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                StartLibraryRefreshPath(operationId, pathId);
+                if (_libraryManager.GetItemById(pathId) is Folder child)
+                {
+                    await RefreshItem(child, options, cancellationToken, operationId).ConfigureAwait(false);
+                }
+
+                CompleteLibraryRefreshPath(operationId, pathId);
             }
         }
 
@@ -1428,6 +1559,19 @@ namespace MediaBrowser.Providers.Manager
 
             if (disposing)
             {
+                lock (_refreshQueueLock)
+                {
+                    if (_disposed)
+                    {
+                        return;
+                    }
+
+                    _disposed = true;
+                    _refreshQueue.Clear();
+                }
+
+                _libraryRefreshes.Changed -= OnLibraryRefreshChanged;
+                _libraryRefreshes.Clear();
                 CollectionFolder.LibraryOptionsUpdated -= OnLibraryOptionsUpdated;
                 _configurationManager.ConfigurationUpdated -= OnConfigurationUpdated;
 

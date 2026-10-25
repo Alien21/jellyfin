@@ -28,12 +28,63 @@ namespace MediaBrowser.Controller.Providers
         event EventHandler<GenericEventArgs<Tuple<BaseItem, double>>> RefreshProgress;
 
         /// <summary>
+        /// Registers the stable library paths participating in one refresh operation.
+        /// </summary>
+        /// <param name="libraries">Library IDs and their distinct physical path IDs.</param>
+        /// <param name="aggregate">Whether percentages include all planned paths.</param>
+        /// <returns>The operation identifier.</returns>
+        Guid BeginLibraryRefresh(IReadOnlyDictionary<Guid, IReadOnlyList<Guid>> libraries, bool aggregate);
+
+        /// <summary>
+        /// Marks a planned physical path as started.
+        /// </summary>
+        /// <param name="operationId">The operation identifier.</param>
+        /// <param name="pathId">The physical path identifier.</param>
+        void StartLibraryRefreshPath(Guid operationId, Guid pathId);
+
+        /// <summary>
+        /// Reports progress for a planned physical path.
+        /// </summary>
+        /// <param name="operationId">The operation identifier.</param>
+        /// <param name="pathId">The physical path identifier.</param>
+        /// <param name="progress">The path percentage.</param>
+        void ReportLibraryRefreshPath(Guid operationId, Guid pathId, double progress);
+
+        /// <summary>
+        /// Marks a planned physical path as completed.
+        /// </summary>
+        /// <param name="operationId">The operation identifier.</param>
+        /// <param name="pathId">The physical path identifier.</param>
+        void CompleteLibraryRefreshPath(Guid operationId, Guid pathId);
+
+        /// <summary>
+        /// Releases one refresh operation, including cancelled or failed work.
+        /// </summary>
+        /// <param name="operationId">The operation identifier.</param>
+        void EndLibraryRefresh(Guid operationId);
+
+        /// <summary>
+        /// Gets the current effective operation for a library, or null when none is planned.
+        /// </summary>
+        /// <param name="libraryId">The library identifier.</param>
+        /// <returns>The library refresh snapshot.</returns>
+        LibraryRefreshProgress GetLibraryRefreshProgress(Guid libraryId);
+
+        /// <summary>
         /// Queues the refresh.
         /// </summary>
         /// <param name="itemId">Item ID.</param>
         /// <param name="options">MetadataRefreshOptions for operation.</param>
         /// <param name="priority">RefreshPriority for operation.</param>
         void QueueRefresh(Guid itemId, MetadataRefreshOptions options, RefreshPriority priority);
+
+        /// <summary>
+        /// Queues a resolved library with its stable physical path plan.
+        /// </summary>
+        /// <param name="library">The library being refreshed.</param>
+        /// <param name="options">The refresh options.</param>
+        /// <param name="priority">The refresh priority.</param>
+        void QueueRefresh(CollectionFolder library, MetadataRefreshOptions options, RefreshPriority priority);
 
         /// <summary>
         /// Refreshes the full item.
