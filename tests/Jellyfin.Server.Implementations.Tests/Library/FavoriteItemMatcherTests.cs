@@ -178,10 +178,15 @@ public sealed class FavoriteItemMatcherTests
         var items = _matcher.GetCollectionItems(_user, collection.Object);
 
         Assert.Equal(new[] { movie.Id, episode.Id }.Order(), items.Select(item => item.Id).Order());
-        collection.Verify(value => value.GetChildren(_user, true, It.Is<InternalItemsQuery>(query =>
-            query.User == _user && query.IsPlayed == null && query.IsVirtualItem == false
-            && !query.GroupByPresentationUniqueKey && query.IncludeAlternateVersions
-            && query.DtoOptions.ContainsField(ItemFields.ProviderIds))), Times.Once);
+        collection.Verify(
+            value => value.GetChildren(
+                _user,
+                true,
+                It.Is<InternalItemsQuery>(query =>
+                    query.User == _user && query.IsPlayed == null && query.IsVirtualItem == false
+                    && !query.GroupByPresentationUniqueKey && query.IncludeAlternateVersions
+                    && query.DtoOptions.ContainsField(ItemFields.ProviderIds))),
+            Times.Once);
     }
 
     [Fact]

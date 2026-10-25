@@ -244,7 +244,7 @@ public sealed class CollectionPostScanIdentityTests
     private static void AssertAdded(Scenario scenario, Guid collectionId, IEnumerable<Movie> movies)
     {
         var expected = movies.Select(movie => movie.Id).ToHashSet();
-        var addition = Assert.Single(scenario.Additions, addition => addition.CollectionId == collectionId);
+        var addition = Assert.Single(scenario.Additions, addition => addition.CollectionId.Equals(collectionId));
         Assert.Equal(expected.Count, addition.MovieIds.Length);
         Assert.True(expected.SetEquals(addition.MovieIds));
     }

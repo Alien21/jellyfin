@@ -29,7 +29,7 @@ public sealed class CollectionManagerPathTests : IDisposable
         var path = CreateExistingCollection(requestedName);
         var metadataPath = Path.Combine(path, "collection.xml");
         const string metadata = "<Item><LocalTitle>Česká kolekce</LocalTitle><TmdbId>123</TmdbId></Item>";
-        File.WriteAllText(metadataPath, metadata);
+        await File.WriteAllTextAsync(metadataPath, metadata, TestContext.Current.CancellationToken).ConfigureAwait(true);
         var manager = CreateManager(requestedName, requestedName);
         var created = false;
         manager.CollectionCreated += (_, _) => created = true;
@@ -41,7 +41,7 @@ public sealed class CollectionManagerPathTests : IDisposable
 
         Assert.Contains("already exists", exception.Message, StringComparison.Ordinal);
         Assert.Contains(path, exception.Message, StringComparison.Ordinal);
-        Assert.Equal(metadata, File.ReadAllText(metadataPath));
+        Assert.Equal(metadata, await File.ReadAllTextAsync(metadataPath, TestContext.Current.CancellationToken).ConfigureAwait(true));
         Assert.Single(Directory.GetFiles(path));
         Assert.False(created);
         _monitor.VerifyNoOtherCalls();
@@ -57,7 +57,7 @@ public sealed class CollectionManagerPathTests : IDisposable
         var path = CreateExistingCollection(sanitizedName);
         var metadataPath = Path.Combine(path, "collection.xml");
         const string metadata = "<Item><LocalTitle>Existing collection</LocalTitle><TmdbId>456</TmdbId></Item>";
-        File.WriteAllText(metadataPath, metadata);
+        await File.WriteAllTextAsync(metadataPath, metadata, TestContext.Current.CancellationToken).ConfigureAwait(true);
         var manager = CreateManager(requestedName, sanitizedName);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => manager.CreateCollectionAsync(new CollectionCreationOptions
@@ -65,7 +65,7 @@ public sealed class CollectionManagerPathTests : IDisposable
             Name = requestedName
         })).ConfigureAwait(true);
 
-        Assert.Equal(metadata, File.ReadAllText(metadataPath));
+        Assert.Equal(metadata, await File.ReadAllTextAsync(metadataPath, TestContext.Current.CancellationToken).ConfigureAwait(true));
         Assert.Single(Directory.GetDirectories(Path.Combine(_directory, "collections")));
         _monitor.VerifyNoOtherCalls();
         _providers.VerifyNoOtherCalls();
@@ -79,7 +79,7 @@ public sealed class CollectionManagerPathTests : IDisposable
         Directory.CreateDirectory(collectionsPath);
         var path = Path.Combine(collectionsPath, name + " [boxset]");
         const string contents = "existing file";
-        File.WriteAllText(path, contents);
+        await File.WriteAllTextAsync(path, contents, TestContext.Current.CancellationToken).ConfigureAwait(true);
         var manager = CreateManager(name, name);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => manager.CreateCollectionAsync(new CollectionCreationOptions
@@ -87,7 +87,7 @@ public sealed class CollectionManagerPathTests : IDisposable
             Name = name
         })).ConfigureAwait(true);
 
-        Assert.Equal(contents, File.ReadAllText(path));
+        Assert.Equal(contents, await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken).ConfigureAwait(true));
         Assert.False(Directory.Exists(path));
         _monitor.VerifyNoOtherCalls();
         _providers.VerifyNoOtherCalls();
