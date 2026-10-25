@@ -183,7 +183,9 @@ namespace MediaBrowser.Providers.Manager
                 return Task.FromResult(ItemUpdateType.None);
             }
 
-            return service.RefreshMetadata(item, options, cancellationToken);
+            // Local artwork exclusions belong to this item, while the original options are also used
+            // to refresh its children and siblings.
+            return service.RefreshMetadata(item, new MetadataRefreshOptions(options), cancellationToken);
         }
 
         /// <inheritdoc/>

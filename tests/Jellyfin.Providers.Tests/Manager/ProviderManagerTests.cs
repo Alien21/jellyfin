@@ -115,6 +115,39 @@ namespace Jellyfin.Providers.Tests.Manager
             Assert.Equal(expectedResult, actual);
         }
 
+        [Fact]
+        public async Task RefreshSingleItem_ArtworkExclusionsRemainLocalToEachItem()
+        {
+            var service = MockIMetadataService(true, true);
+            var received = new List<MetadataRefreshOptions>();
+            service.Setup(s => s.RefreshMetadata(It.IsAny<BaseItem>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<CancellationToken>()))
+                .Callback<BaseItem, MetadataRefreshOptions, CancellationToken>((_, options, _) =>
+                {
+                    Assert.True(options.IgnoreNfo);
+                    Assert.True(options.IsReplacingImage(ImageType.Primary));
+                    received.Add(options);
+                    new ItemImageProvider(_logger, Mock.Of<IProviderManager>(), Mock.Of<IFileSystem>())
+                        .UpdateReplaceImages(options, [ImageType.Primary]);
+                })
+                .ReturnsAsync(ItemUpdateType.None);
+            using var manager = GetProviderManager();
+            AddParts(manager, metadataServices: [service.Object]);
+            var original = new MetadataRefreshOptions(Mock.Of<IDirectoryService>())
+            {
+                MetadataRefreshMode = MetadataRefreshMode.FullRefresh,
+                ImageRefreshMode = MetadataRefreshMode.FullRefresh,
+                ReplaceAllImages = true,
+                IgnoreNfo = true
+            };
+
+            await manager.RefreshSingleItem(new Movie(), original, CancellationToken.None);
+            await manager.RefreshSingleItem(new Movie(), original, CancellationToken.None);
+
+            Assert.True(original.ReplaceAllImages);
+            Assert.NotSame(original, received[0]);
+            Assert.NotSame(received[0], received[1]);
+        }
+
         public static TheoryData<int, int[]?, int[]?, int?[]?, int[]> GetImageProvidersOrderData()
             => new()
             {

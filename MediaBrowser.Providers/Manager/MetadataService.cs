@@ -804,6 +804,12 @@ namespace MediaBrowser.Providers.Manager
             {
                 foreach (var provider in providers.OfType<ILocalMetadataProvider<TItemType>>())
                 {
+                    // NFO files can supply remote artwork URLs as well as text metadata.
+                    if (options.IgnoreNfo && string.Equals(provider.Name, "Nfo", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     var providerName = provider.GetType().Name;
                     Logger.LogDebug("Running {Provider} for {Item}", providerName, logName);
 

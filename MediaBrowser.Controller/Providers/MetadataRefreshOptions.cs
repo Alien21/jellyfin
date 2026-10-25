@@ -24,6 +24,7 @@ namespace MediaBrowser.Controller.Providers
             MetadataRefreshMode = copy.MetadataRefreshMode;
             ForceSave = copy.ForceSave;
             ReplaceAllMetadata = copy.ReplaceAllMetadata;
+            IgnoreNfo = copy.IgnoreNfo;
             EnableRemoteContentProbe = copy.EnableRemoteContentProbe;
 
             IsAutomated = copy.IsAutomated;
@@ -47,6 +48,11 @@ namespace MediaBrowser.Controller.Providers
         /// when paired with MetadataRefreshMode=FullRefresh.
         /// </summary>
         public bool ReplaceAllMetadata { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether NFO metadata and artwork references are ignored for this refresh.
+        /// </summary>
+        public bool IgnoreNfo { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether all existing trickplay images should be overwritten

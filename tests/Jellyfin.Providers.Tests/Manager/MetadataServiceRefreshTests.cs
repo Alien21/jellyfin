@@ -25,6 +25,40 @@ namespace Jellyfin.Providers.Tests.Manager
     public class MetadataServiceRefreshTests
     {
         [Theory]
+        [InlineData(false, "Nfo", true)]
+        [InlineData(true, "Nfo", false)]
+        [InlineData(true, "Other local provider", true)]
+        public async Task RefreshWithProviders_IgnoreNfoSkipsOnlyNfoMetadataAndArtwork(bool ignoreNfo, string providerName, bool localRead)
+        {
+            var item = new Movie { Name = "Movie" };
+            var localResult = new MetadataResult<Movie>
+            {
+                HasMetadata = true, Item = new Movie { Name = "Movie", Tagline = "Local tagline" },
+                RemoteImages = [("https://example.org/nfo.jpg", ImageType.Primary)]
+            };
+            var local = new Mock<ILocalMetadataProvider<Movie>>();
+            local.Setup(p => p.Name).Returns(providerName);
+            local.Setup(p => p.GetMetadata(It.IsAny<ItemInfo>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>())).ReturnsAsync(localResult);
+            var remote = new Mock<IRemoteMetadataProvider<Movie, MovieInfo>>();
+            remote.Setup(p => p.Name).Returns("Remote");
+            remote.Setup(p => p.GetMetadata(It.IsAny<MovieInfo>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new MetadataResult<Movie> { HasMetadata = true, Item = new Movie { Name = "Movie", Tagline = "Remote tagline" } });
+            var manager = new Mock<IProviderManager>();
+            manager.Setup(p => p.SaveImage(It.IsAny<BaseItem>(), It.IsAny<string>(), It.IsAny<ImageType>(), It.IsAny<int?>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+            var service = new TestMetadataService(manager.Object);
+
+            await service.RefreshWithProvidersInternal(
+                new MetadataResult<Movie> { Item = item },
+                new MovieInfo(),
+                new MetadataRefreshOptions(Mock.Of<IDirectoryService>()) { MetadataRefreshMode = MetadataRefreshMode.FullRefresh, IgnoreNfo = ignoreNfo },
+                [local.Object, remote.Object]);
+
+            local.Verify(p => p.GetMetadata(It.IsAny<ItemInfo>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>()), localRead ? Times.Once : Times.Never);
+            manager.Verify(p => p.SaveImage(item, "https://example.org/nfo.jpg", ImageType.Primary, null, It.IsAny<CancellationToken>()), localRead ? Times.Once : Times.Never);
+            Assert.Equal(localRead ? "Local tagline" : "Remote tagline", item.Tagline);
+        }
+
+        [Theory]
         // RemoveOldMetadata is only ever set by an explicit user action - a refresh with "replace all
         // metadata", or Identify. A provider failing must not silently downgrade that to a merge: the
         // providers that did answer supplied the replacement, and the old values are the wrong match
@@ -469,11 +503,11 @@ namespace Jellyfin.Providers.Tests.Manager
 
         private sealed class TestMetadataService : MetadataService<Movie, MovieInfo>
         {
-            public TestMetadataService()
+            public TestMetadataService(IProviderManager? providerManager = null, ServerConfiguration? configuration = null)
                 : base(
-                    Mock.Of<IServerConfigurationManager>(),
+                    Mock.Of<IServerConfigurationManager>(manager => manager.Configuration == (configuration ?? new ServerConfiguration())),
                     NullLogger<MetadataService<Movie, MovieInfo>>.Instance,
-                    Mock.Of<IProviderManager>(),
+                    providerManager ?? Mock.Of<IProviderManager>(),
                     Mock.Of<IFileSystem>(),
                     Mock.Of<ILibraryManager>(),
                     Mock.Of<IExternalDataManager>(),
