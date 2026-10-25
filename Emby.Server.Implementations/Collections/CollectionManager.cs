@@ -172,6 +172,10 @@ namespace Emby.Server.Implementations.Collections
             }
 
             var path = Path.Combine(parentFolder.Path, folderName);
+            if (Directory.Exists(path) || File.Exists(path))
+            {
+                throw new InvalidOperationException($"Cannot create collection '{name}': the metadata path '{path}' already exists.");
+            }
 
             _iLibraryMonitor.ReportFileSystemChangeBeginning(path);
 
