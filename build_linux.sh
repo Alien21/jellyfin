@@ -8,7 +8,7 @@ runtime="${RID:-linux-x64}"
 framework="net10.0"
 run_tests=false
 skip_restore=false
-test_project="Jellyfin.sln"
+test_project="Jellyfin.slnx"
 test_filter=""
 
 usage() {
@@ -21,7 +21,7 @@ Set DOTNET_BIN to an SDK dotnet executable if it is not on PATH.
 
   -r, --runtime RID       linux-x64 (default), linux-arm64 or linux-arm
       --tests             Run tests on the build host before packaging
-      --test-project PATH Test solution/project (default: Jellyfin.sln)
+      --test-project PATH Test solution/project (default: Jellyfin.slnx)
       --test-filter EXPR  dotnet test filter (also enables --tests)
       --skip-restore      Reuse existing restored assets for this RID/tests
   -h, --help              Show this help

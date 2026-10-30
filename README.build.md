@@ -38,7 +38,7 @@ Vedle archivu vzniká soubor `.sha256`. Archiv i hotová složka obsahují `buil
 
 ## Testy
 
-`--tests` před zabalením spustí testy na systému, kde sestavuješ. Výchozí je celé řešení; projektem a filtrem lze rozsah omezit:
+`--tests` před zabalením spustí testy na systému, kde sestavuješ. Výchozí je celé řešení `Jellyfin.slnx`; projektem a filtrem lze rozsah omezit:
 
 ```bash
 bash ./build_linux.sh --tests

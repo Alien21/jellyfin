@@ -14,7 +14,7 @@ namespace Jellyfin.Server.Implementations.Tests.TypedBaseItem
             var loadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
             foreach (var assembly in loadedAssemblies)
             {
-                if (IsProjectAssemblyName(assembly.FullName))
+                if (IsProductionProjectAssemblyName(assembly.GetName().Name))
                 {
                     var baseItemTypes = assembly.GetTypes()
                         .Where(targetType => targetType.IsClass
@@ -48,9 +48,9 @@ namespace Jellyfin.Server.Implementations.Tests.TypedBaseItem
             Assert.Null(exception);
         }
 
-        private static bool IsProjectAssemblyName(string? name)
+        private static bool IsProductionProjectAssemblyName(string? name)
         {
-            if (name is null)
+            if (name is null || name.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
