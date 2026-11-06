@@ -201,7 +201,7 @@ try:
         if web_path is not None:
             web = stack.enter_context(tarfile.open(web_path, "r:gz"))
             wm = members(web, "jellyfin-web")
-            for name in ("index.html", "config.json", "serviceworker.js", "build-info.json"):
+            for name in ("index.html", "config.json", "build-info.json"):
                 required(wm, "jellyfin-web/" + name)
             wi = metadata(web, wm, "jellyfin-web/build-info.json")
             versions.append(wi.get("packageVersion"))
